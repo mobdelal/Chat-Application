@@ -3,10 +3,14 @@ using DTOs.Shared;
 using DTOs.UserDTOs;
 using Mappings.UserMapping;
 using Microsoft.EntityFrameworkCore;
+using Microsoft.Extensions.Options;
+using Microsoft.IdentityModel.Tokens;
 using Models;
 using System;
 using System.Collections.Generic;
+using System.IdentityModel.Tokens.Jwt;
 using System.Linq;
+using System.Security.Claims;
 using System.Text;
 using System.Threading.Tasks;
 
@@ -15,9 +19,13 @@ namespace Application.UserSr
     public class UserService : IUserService
     {
         private readonly AppDbContext _context;
-        public UserService(AppDbContext context)
+        private readonly JwtSettings _jwtSettings;
+
+        public UserService(AppDbContext context, IOptions<JwtSettings> jwtSettings)
         {
             _context = context;
+            _jwtSettings = jwtSettings.Value;
+
         }
 
         public async Task<Result<UserDTO>> RegisterAsync(RegisterDTO dto)
@@ -30,7 +38,8 @@ namespace Application.UserSr
                 if (await _context.Users.AnyAsync(u => u.Email == dto.Email))
                     return Result<UserDTO>.Failure("Email is already in use.");
 
-                string avatarUrl = string.Empty;
+                string avatarUrl = "/images/default/defaultUser.png"; 
+
                 if (dto.Avatar != null)
                 {
                     var allowedMimeTypes = new[]
@@ -64,10 +73,8 @@ namespace Application.UserSr
                     avatarUrl = "/images/avatars/" + fileName;
                 }
 
-                // Hash password
                 var hashedPassword = BCrypt.Net.BCrypt.HashPassword(dto.Password);
 
-                // Create user
                 var user = new User
                 {
                     Username = dto.Username,
@@ -88,7 +95,7 @@ namespace Application.UserSr
                 return Result<UserDTO>.Failure($"An error occurred during registration: {ex.Message}");
             }
         }
-        public async Task<Result<UserDTO>> LoginAsync(LoginDTO dto)
+        public async Task<Result<string>> LoginAsync(LoginDTO dto)
         {
             try
             {
@@ -96,22 +103,47 @@ namespace Application.UserSr
                     .FirstOrDefaultAsync(u => u.Username == dto.UsernameOrEmail || u.Email == dto.UsernameOrEmail);
 
                 if (user == null)
-                    return Result<UserDTO>.Failure("Invalid username or email.");
+                    return Result<string>.Failure("Invalid username or email.");
 
                 bool passwordMatches = BCrypt.Net.BCrypt.Verify(dto.Password, user.Password);
                 if (!passwordMatches)
-                    return Result<UserDTO>.Failure("Invalid password.");
+                    return Result<string>.Failure("Invalid password.");
 
                 user.IsOnline = true;
                 user.LastSeen = DateTime.UtcNow;
                 await _context.SaveChangesAsync();
 
-                return Result<UserDTO>.Success(user.ToUserDTO());
+                var token =  GenerateJwtToken(user); 
+
+                return Result<string>.Success(token);
             }
             catch (Exception ex)
             {
-                return Result<UserDTO>.Failure($"An error occurred during login: {ex.Message}");
+                return Result<string>.Failure($"An error occurred during login: {ex.Message}");
             }
+        }
+        private string GenerateJwtToken(User user)
+        {
+            var claims = new List<Claim>
+            {
+                new Claim(JwtRegisteredClaimNames.Sub, user.Username!),
+                new Claim(JwtRegisteredClaimNames.Email, user.Email!),
+                new Claim("id", user.Id.ToString()),
+                new Claim(ClaimTypes.Name, user.Username!)
+            };
+
+            var key = new SymmetricSecurityKey(Encoding.UTF8.GetBytes(_jwtSettings.Key));
+            var creds = new SigningCredentials(key, SecurityAlgorithms.HmacSha256);
+
+            var token = new JwtSecurityToken(
+                issuer: _jwtSettings.Issuer,
+                audience: _jwtSettings.Audience,
+                claims: claims,
+                expires: DateTime.Now.AddHours(2),
+                signingCredentials: creds
+            );
+
+            return new JwtSecurityTokenHandler().WriteToken(token);
         }
         public async Task<Result<UserDetailsDTO>> GetUserDetailsByIdAsync(int userId)
         {
@@ -293,14 +325,47 @@ namespace Application.UserSr
         }
 
 
-        public Task<Result<bool>> UpdateLastSeenAsync(int userId)
+
+        public async Task<Result<bool>> UpdateUserStatusAsync(int userId, bool isOnline)
         {
-            throw new NotImplementedException();
+            try
+            {
+                var user = await _context.Users.FirstOrDefaultAsync(u => u.Id == userId);
+                if (user == null)
+                {
+                    return Result<bool>.Failure("User not found.");
+                }
+
+                user.IsOnline = isOnline;
+
+
+                await _context.SaveChangesAsync();
+                return Result<bool>.Success(true);
+            }
+            catch (Exception ex)
+            {
+                return Result<bool>.Failure($"Failed to update online status: {ex.Message}");
+            }
         }
 
-        public Task<Result<bool>> UpdateUserStatusAsync(int userId, bool isOnline)
+        public async Task<Result<bool>> UpdateLastSeenAsync(int userId)
         {
-            throw new NotImplementedException();
+            try
+            {
+                var user = await _context.Users.FirstOrDefaultAsync(u => u.Id == userId);
+                if (user == null)
+                {
+                    return Result<bool>.Failure("User not found.");
+                }
+
+                user.LastSeen = DateTime.UtcNow; 
+                await _context.SaveChangesAsync();
+                return Result<bool>.Success(true);
+            }
+            catch (Exception ex)
+            {
+                return Result<bool>.Failure($"Failed to update last seen: {ex.Message}");
+            }
         }
     }
 }

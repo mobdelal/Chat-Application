@@ -1,0 +1,72 @@
+Domain : https://restaurantcafee.runasp.net/api/
+
+Category End Points 
+POST /api/Category/create
+{
+  "NameEN": "Pizza",
+  "NameAR": "بيتزا",
+  "IsActive": true
+}
+PUT /api/Category/update
+{
+  "id": 1,
+  "nameEN": "Updated Pizza",
+  "nameAR": "بيتزا محدثة",
+  "isActive": true
+}
+GET /api/Category/all
+GET /api/Category/{id}
+DELETE /api/Category/delete/{id}
+GET /api/Category/search?keyword=""
+PUT /api/Category/deactivate/{id}
+GET /api/Category/activated
+
+Food API Endpoints
+Base URL: https://restaurantcafee.runasp.net/api/Food
+POST /create
+{
+  "nameEN": "Pizza",
+  "nameAR": "بيتزا",
+  "description": "Delicious cheese pizza",
+  "price": 10.99,
+  "categoryId": 1,
+  "isActive": true,
+  "orderIndex": 1, or null if not added
+  "sizes": [
+    {
+      "size": 0,
+      "price": 8.99
+    },
+    {
+      "size": 1,
+      "price": 12.99
+    },
+    {
+      "size": 2,
+      "price": 15
+    }
+  ]
+}
+PUT /update
+{
+  "id": 1,
+  "nameEN": "Updated Pizza",
+  "nameAR": "بيتزا محدثة",
+  "description": "Updated description",
+  "price": 11.99,
+  "imageUrl": "https://example.com/new-image.jpg",
+  "categoryId": 1,
+  "isActive": true,
+  "orderIndex": 2
+}
+GET /api/Food/all
+GET /api/Food/{id}
+DELETE /api/Food/delete/{id}
+GET /api/Food/search?keyword=""
+PUT /api/Food/deactivate/{id}
+GET /api/Food/activated
+GET /api/Food/category/{categoryId}
+GET /api/Food/under-price?maxPrice=
+
+
+

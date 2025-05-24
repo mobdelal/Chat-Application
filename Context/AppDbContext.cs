@@ -50,14 +50,16 @@ namespace Context
                 .HasKey(r => new { r.MessageId, r.UserId });
 
             modelBuilder.Entity<MessageReaction>()
-                .HasOne(r => r.Message)
-                .WithMany(m => m.Reactions)
-                .HasForeignKey(r => r.MessageId);
-
-            modelBuilder.Entity<MessageReaction>()
                 .HasOne(r => r.User)
                 .WithMany()
-                .HasForeignKey(r => r.UserId);
+                .HasForeignKey(r => r.UserId)
+                .OnDelete(DeleteBehavior.Restrict);
+
+            modelBuilder.Entity<MessageReaction>()
+                .HasOne(r => r.Message)
+                .WithMany(m => m.Reactions)
+                .HasForeignKey(r => r.MessageId)
+                .OnDelete(DeleteBehavior.Cascade);
 
         }
 

@@ -10,5 +10,8 @@ namespace DTOs.ChatDTOs
         public DateTime CreatedAt { get; set; }
         public List<ChatParticipantDTO> Participants { get; set; } = new();
         public List<MessageDTO> Messages { get; set; } = new();
+        public int UnreadCount { get; set; } 
+        public MessageDTO? LastMessage { get; set; }
+
     }
 }

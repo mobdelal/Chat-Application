@@ -4,8 +4,10 @@ namespace DTOs.MessageDTOs
 {
     public class FileAttachmentCreateDTO
     {
-        public IFormFile? FileData { get; set; } 
+        public string FileData { get; set; } = string.Empty; 
         public string FileUrl { get; set; } = string.Empty;
         public string FileType { get; set; } = string.Empty;
+        public string FileName { get; set; } = string.Empty;
+
     }
 }

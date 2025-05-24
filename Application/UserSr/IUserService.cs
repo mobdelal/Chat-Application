@@ -6,7 +6,7 @@ namespace Application.UserSr
     public interface IUserService
     {
         Task<Result<UserDTO>> RegisterAsync(RegisterDTO dto);
-        Task<Result<UserDTO>> LoginAsync(LoginDTO dto);
+        Task<Result<string>> LoginAsync(LoginDTO dto);
         Task<Result<UserDetailsDTO>> GetUserDetailsByIdAsync(int userId);
         Task<Result<UserDTO>> GetUserByUsernameAsync(string username);
         Task<Result<List<UserDTO>>> SearchUsersAsync(int searchingUserId, string searchTerm);

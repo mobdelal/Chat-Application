@@ -1,7 +1,7 @@
 ﻿
 Microsoft Visual Studio Solution File, Format Version 12.00
 # Visual Studio Version 17
-VisualStudioVersion = 17.13.35825.156 d17.13
+VisualStudioVersion = 17.13.35825.156
 MinimumVisualStudioVersion = 10.0.40219.1
 Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "Models", "Models\Models.csproj", "{05C3ACA5-C4C6-45B8-B4B5-C6791BB7FC50}"
 EndProject
@@ -12,6 +12,8 @@ EndProject
 Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "DTOs", "DTOs\DTOs.csproj", "{CF66E9CB-4ACE-4E4F-8992-BECC95D2CBCC}"
 EndProject
 Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "Mappings", "Mappings\Mappings.csproj", "{C3403657-B445-4385-86C1-25BC649166CD}"
+EndProject
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "ChatAPI", "ChatAPI\ChatAPI.csproj", "{9AF748CA-12A9-4CC6-B725-32A4DE23A0FF}"
 EndProject
 Global
 	GlobalSection(SolutionConfigurationPlatforms) = preSolution
@@ -39,6 +41,10 @@ Global
 		{C3403657-B445-4385-86C1-25BC649166CD}.Debug|Any CPU.Build.0 = Debug|Any CPU
 		{C3403657-B445-4385-86C1-25BC649166CD}.Release|Any CPU.ActiveCfg = Release|Any CPU
 		{C3403657-B445-4385-86C1-25BC649166CD}.Release|Any CPU.Build.0 = Release|Any CPU
+		{9AF748CA-12A9-4CC6-B725-32A4DE23A0FF}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+		{9AF748CA-12A9-4CC6-B725-32A4DE23A0FF}.Debug|Any CPU.Build.0 = Debug|Any CPU
+		{9AF748CA-12A9-4CC6-B725-32A4DE23A0FF}.Release|Any CPU.ActiveCfg = Release|Any CPU
+		{9AF748CA-12A9-4CC6-B725-32A4DE23A0FF}.Release|Any CPU.Build.0 = Release|Any CPU
 	EndGlobalSection
 	GlobalSection(SolutionProperties) = preSolution
 		HideSolutionNode = FALSE

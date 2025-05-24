@@ -7,5 +7,6 @@
         public Message? Message { get; set; }
         public string FileUrl { get; set; } = null!;
         public string FileType { get; set; } = null!;
+        public string FileName { get; set; } = string.Empty;
     }
 }
