@@ -14,6 +14,12 @@ namespace Application.ChatSR
         Task<Result<MessageDTO>> SendMessageAsync(SendMessageDTO dto);
         Task<Result<List<MessageDTO>>> GetChatMessagesAsync(int chatId, int? lastMessageId = null, int pageSize = 50);
         Task<Result<List<int>>> GetUserChatIdsAsync(int userId);
+        Task<Result<bool>> MarkMessagesAsReadAsync(int chatId, int userId, int lastReadMessageId);
+        Task<Result<List<ChatDTO>>> SearchChatsByNameAsync(string searchTerm, int userId, int pageNumber = 1, int pageSize = 20);
+
+
+
+
 
     }
 }

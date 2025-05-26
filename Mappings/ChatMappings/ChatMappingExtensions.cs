@@ -8,18 +8,20 @@ namespace Mappings.ChatMappings
 {
     public static class ChatMappingExtensions
     {
-        public static ChatDTO ToDTO(this Chat chat, int currentUserId) 
+        public static ChatDTO ToDTO(this Chat chat, int currentUserId)
         {
             var currentUserParticipant = chat.Participants
                 .FirstOrDefault(p => p.UserId == currentUserId);
 
+            int lastReadMessageId = currentUserParticipant?.LastReadMessageId ?? 0;
+
             var unreadCount = chat.Messages
                 .Count(m => (currentUserParticipant?.LastReadAt == null || m.SentAt > currentUserParticipant.LastReadAt)
-                            && m.SenderId != currentUserId);
+                             && m.SenderId != currentUserId);
 
             // Get the last message
             var lastMessage = chat.Messages
-                .Where(m => !m.IsDeleted) 
+                .Where(m => !m.IsDeleted)
                 .OrderByDescending(m => m.SentAt)
                 .FirstOrDefault();
 
@@ -40,32 +42,36 @@ namespace Mappings.ChatMappings
                     JoinedAt = p.JoinedAt
                 }).ToList() ?? new(),
 
-                Messages = chat.Messages?.Select(m => new MessageDTO 
-                {
-                    Id = m.Id,
-                    ChatId = m.ChatId,
-                    SenderId = m.SenderId,
-                    SenderUsername = m.Sender?.Username ?? "",
-                    SenderAvatarUrl = m.Sender?.AvatarUrl,
-                    Content = m.Content,
-                    SentAt = m.SentAt,
-                    EditedAt = m.EditedAt,
-                    IsDeleted = m.IsDeleted,
-                    Attachments = m.Attachments?.Select(a => new FileAttachmentDTO
+                Messages = chat.Messages?
+                    .OrderBy(m => m.SentAt) // Ensure messages are ordered for correct read logic
+                    .Select(m => new MessageDTO
                     {
-                        Id = a.Id,
-                        FileUrl = a.FileUrl,
-                        FileType = a.FileType
+                        Id = m.Id,
+                        ChatId = m.ChatId,
+                        SenderId = m.SenderId,
+                        SenderUsername = m.Sender?.Username ?? "",
+                        SenderAvatarUrl = m.Sender?.AvatarUrl,
+                        Content = m.Content,
+                        SentAt = m.SentAt,
+                        EditedAt = m.EditedAt,
+                        IsDeleted = m.IsDeleted,
+                        // This line now correctly uses the initialized 'lastReadMessageId'
+                        IsReadByCurrentUser = (m.SenderId == currentUserId) || (m.Id <= lastReadMessageId),
+                        Attachments = m.Attachments?.Select(a => new FileAttachmentDTO
+                        {
+                            Id = a.Id,
+                            FileUrl = a.FileUrl,
+                            FileType = a.FileType
+                        }).ToList() ?? new(),
+                        Reactions = m.Reactions?.Select(r => new MessageReactionDTO
+                        {
+                            UserId = r.UserId,
+                            Reaction = r.Reaction
+                        }).ToList() ?? new()
                     }).ToList() ?? new(),
-                    Reactions = m.Reactions?.Select(r => new MessageReactionDTO
-                    {
-                        UserId = r.UserId,
-                        Reaction = r.Reaction
-                    }).ToList() ?? new()
-                }).ToList() ?? new(),
 
                 UnreadCount = unreadCount,
-                LastMessage = lastMessage?.ToDTO() 
+                LastMessage = lastMessage?.ToDTO()
             };
         }
 

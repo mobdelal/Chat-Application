@@ -154,22 +154,34 @@ namespace Application.ChatSR
                 if (pageSize < 1 || pageSize > 100) pageSize = 50;
 
                 var query = _context.Messages
-                    .Where(m => m.ChatId == chatId);
+                    .Where(m => m.ChatId == chatId && !m.IsDeleted); 
 
                 if (lastMessageId.HasValue)
                 {
-                    query = query.Where(m => m.Id < lastMessageId.Value);
+                    var lastMessageSentAt = await _context.Messages
+                        .Where(m => m.Id == lastMessageId.Value)
+                        .Select(m => m.SentAt)
+                        .FirstOrDefaultAsync();
+
+                    if (lastMessageSentAt != default) 
+                    {
+
+                        query = query.Where(m => m.SentAt < lastMessageSentAt || (m.SentAt == lastMessageSentAt && m.Id < lastMessageId.Value));
+                    }
+                    else
+                    {
+                        return Result<List<MessageDTO>>.Success(new List<MessageDTO>());
+                    }
                 }
 
                 var messages = await query
-                    .OrderByDescending(m => m.Id)
+                    .OrderByDescending(m => m.SentAt)
                     .Take(pageSize)
                     .Include(m => m.Sender)
                     .Include(m => m.Attachments)
                     .Include(m => m.Reactions)
                     .ToListAsync();
-
-                messages.Reverse(); // Keep messages in chronological order for UI
+                messages.Reverse();
 
                 var messageDTOs = messages.Select(m => m.ToDTO()).ToList();
 
@@ -177,24 +189,28 @@ namespace Application.ChatSR
             }
             catch (Exception ex)
             {
+                Console.WriteLine($"Exception in GetChatMessagesAsync: {ex}"); 
                 return Result<List<MessageDTO>>.Failure($"Failed to load chat messages: {ex.Message}");
             }
         }
-
         public async Task<Result<ChatDTO>> GetChatByIdAsync(int chatId, int currentUserId)
         {
             try
             {
-                // Retrieve the chat with all necessary related data
-                // We use AsTracking() here because we intend to modify the ChatParticipant later.
+                const int initialMessagePageSize = 50;
+
                 var chat = await _context.Chats
                     .Include(c => c.Participants)
                         .ThenInclude(p => p.User)
-                    .Include(c => c.Messages.OrderBy(m => m.SentAt).Take(50)) // Load initial 50 messages
-                        .ThenInclude(m => m.Sender)
-                    .Include(c => c.Messages)
+                    // Start the single Include chain for Messages
+                    .Include(c => c.Messages
+                        .Where(m => !m.IsDeleted) 
+                        .OrderByDescending(m => m.SentAt) 
+                        .Take(initialMessagePageSize))    
+                        .ThenInclude(m => m.Sender)      
+                    .Include(c => c.Messages)      
                         .ThenInclude(m => m.Attachments)
-                    .Include(c => c.Messages)
+                    .Include(c => c.Messages)        
                         .ThenInclude(m => m.Reactions)
                     .FirstOrDefaultAsync(c => c.Id == chatId);
 
@@ -203,7 +219,6 @@ namespace Application.ChatSR
                     return Result<ChatDTO>.Failure("Chat not found.");
                 }
 
-                // Find the current user's participant record
                 var currentUserParticipant = chat.Participants.FirstOrDefault(p => p.UserId == currentUserId);
 
                 if (currentUserParticipant == null)
@@ -214,17 +229,23 @@ namespace Application.ChatSR
                 if (currentUserParticipant.LastReadAt == null || currentUserParticipant.LastReadAt < DateTime.UtcNow)
                 {
                     currentUserParticipant.LastReadAt = DateTime.UtcNow;
-                    _context.ChatParticipants.Update(currentUserParticipant); // Mark for update
-                    await _context.SaveChangesAsync(); // Persist the change to the database
+                    _context.ChatParticipants.Update(currentUserParticipant);
+                    await _context.SaveChangesAsync();
                 }
 
                 var chatDTO = chat.ToDTO(currentUserId);
+
+                if (chatDTO.Messages != null && chatDTO.Messages.Any())
+                {
+                    chatDTO.Messages = chatDTO.Messages.OrderBy(m => m.SentAt).ToList(); 
+                }
+
 
                 return Result<ChatDTO>.Success(chatDTO);
             }
             catch (Exception ex)
             {
-                Console.WriteLine($"Exception in GetChatByIdAsync: {ex}"); // Log the full exception
+                Console.WriteLine($"Exception in GetChatByIdAsync: {ex}");
                 return Result<ChatDTO>.Failure($"An error occurred while fetching the chat: {ex.Message}");
             }
         }
@@ -513,7 +534,8 @@ namespace Application.ChatSR
 
             var unreadCount = await _context.Messages
                 .Where(m => m.ChatId == chatId &&
-                            m.SentAt > participant.JoinedAt && 
+                            m.SentAt > participant.JoinedAt &&
+                            m.SenderId != userId && 
                             (!participant.LastReadMessageId.HasValue || m.Id > participant.LastReadMessageId.Value))
                 .CountAsync();
 
@@ -541,7 +563,6 @@ namespace Application.ChatSR
 
             return totalUnreadCount;
         }
-
         public async Task<Result<bool>> AddParticipantAsync(int chatId, int userId)
         {
             try
@@ -583,7 +604,6 @@ namespace Application.ChatSR
                 return Result<bool>.Failure($"An error occurred while adding participant: {ex.Message}");
             }
         }
-
         public async Task<Result<bool>> RemoveParticipantAsync(int chatId, int userIdToRemove, int kickerUserId)
         {
             try
@@ -618,7 +638,6 @@ namespace Application.ChatSR
                 return Result<bool>.Failure($"An error occurred while removing participant: {ex.Message}");
             }
         }
-
         public async Task<Result<List<int>>> GetUserChatIdsAsync(int userId)
         {
             try
@@ -640,6 +659,115 @@ namespace Application.ChatSR
             catch (Exception ex)
             {
                 return Result<List<int>>.Failure($"Failed to retrieve user chat IDs: {ex.Message}");
+            }
+        }
+        public async Task<Result<bool>> MarkMessagesAsReadAsync(int chatId, int userId, int lastReadMessageId)
+        {
+            try
+            {
+                var participant = await _context.ChatParticipants
+                    .FirstOrDefaultAsync(cp => cp.ChatId == chatId && cp.UserId == userId);
+
+                if (participant == null)
+                {
+                    return Result<bool>.Failure("Chat participant not found.");
+                }
+                if (!participant.LastReadMessageId.HasValue || lastReadMessageId > participant.LastReadMessageId.Value)
+                {
+                    participant.LastReadMessageId = lastReadMessageId;
+                    participant.LastReadAt = DateTime.UtcNow; 
+                    await _context.SaveChangesAsync();
+                }
+
+                return Result<bool>.Success(true);
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"Exception in MarkMessagesAsReadAsync: {ex}"); // Log the full exception
+                return Result<bool>.Failure($"An error occurred while marking messages as read: {ex.Message}");
+            }
+        }
+
+        public async Task<Result<List<ChatDTO>>> SearchChatsByNameAsync(string searchTerm, int userId, int pageNumber = 1, int pageSize = 20)
+        {
+            try
+            {
+                if (pageNumber < 1) pageNumber = 1;
+                if (pageSize < 1 || pageSize > 100) pageSize = 20;
+
+                // Ensure the search term is not null or empty
+                if (string.IsNullOrWhiteSpace(searchTerm))
+                {
+                    return Result<List<ChatDTO>>.Success(new List<ChatDTO>()); // Return empty list if no search term
+                }
+
+                // Convert search term to lowercase for case-insensitive search
+                var lowerSearchTerm = searchTerm.ToLower();
+
+                var chats = await _context.Chats
+                    .AsNoTracking()
+                    .Where(c => c.Participants.Any(p => p.UserId == userId) &&
+                                (c.Name != null && c.Name.ToLower().Contains(lowerSearchTerm)))
+                    .Include(c => c.Participants)
+                        .ThenInclude(p => p.User)
+                    .Include(c => c.Messages.Where(m => !m.IsDeleted)) // Load only non-deleted messages
+                        .ThenInclude(m => m.Sender)
+                    .Include(c => c.Messages.Where(m => !m.IsDeleted))
+                        .ThenInclude(m => m.Attachments)
+                    .Include(c => c.Messages.Where(m => !m.IsDeleted))
+                        .ThenInclude(m => m.Reactions)
+                    .OrderByDescending(c => c.CreatedAt) // Order by creation date, or consider a relevancy score if needed
+                    .Skip((pageNumber - 1) * pageSize)
+                    .Take(pageSize)
+                    .ToListAsync();
+
+                var chatDTOs = new List<ChatDTO>();
+
+                foreach (var chat in chats)
+                {
+                    var currentUserParticipant = chat.Participants
+                        .FirstOrDefault(p => p.UserId == userId);
+
+                    var unreadCount = chat.Messages
+                        .Count(m => (currentUserParticipant?.LastReadAt == null || m.SentAt > currentUserParticipant.LastReadAt)
+                                     && m.SenderId != userId);
+
+                    var lastMessage = chat.Messages
+                        .OrderByDescending(m => m.SentAt)
+                        .FirstOrDefault();
+
+                    var dto = new ChatDTO
+                    {
+                        Id = chat.Id,
+                        Name = chat.Name,
+                        AvatarUrl = chat.AvatarUrl,
+                        IsGroup = chat.IsGroup,
+                        CreatedAt = chat.CreatedAt,
+                        Participants = chat.Participants?.Select(p => new ChatParticipantDTO
+                        {
+                            UserId = p.UserId,
+                            Username = p.User?.Username ?? "",
+                            AvatarUrl = p.User?.AvatarUrl,
+                            IsAdmin = p.IsAdmin,
+                            JoinedAt = p.JoinedAt
+                        }).ToList() ?? new(),
+                        Messages = new List<MessageDTO>(), 
+                        UnreadCount = unreadCount,
+                        LastMessage = lastMessage?.ToDTO()
+                    };
+                    chatDTOs.Add(dto);
+                }
+
+                chatDTOs = chatDTOs
+                    .OrderByDescending(dto => dto.LastMessage?.SentAt ?? dto.CreatedAt)
+                    .ToList();
+
+                return Result<List<ChatDTO>>.Success(chatDTOs);
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"Exception in SearchChatsByNameAsync: {ex}");
+                return Result<List<ChatDTO>>.Failure($"An error occurred while searching for chats: {ex.Message}");
             }
         }
     }

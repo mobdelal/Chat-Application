@@ -20,11 +20,13 @@ namespace Application.UserSr
     {
         private readonly AppDbContext _context;
         private readonly JwtSettings _jwtSettings;
+        private readonly string _webRootPath;
 
         public UserService(AppDbContext context, IOptions<JwtSettings> jwtSettings)
         {
             _context = context;
             _jwtSettings = jwtSettings.Value;
+            _webRootPath = Path.Combine(Directory.GetCurrentDirectory(), "wwwroot"); 
 
         }
 
@@ -38,7 +40,7 @@ namespace Application.UserSr
                 if (await _context.Users.AnyAsync(u => u.Email == dto.Email))
                     return Result<UserDTO>.Failure("Email is already in use.");
 
-                string avatarUrl = "/images/default/defaultUser.png"; 
+                string avatarUrl = "/images/default/defaultUser.png";
 
                 if (dto.Avatar != null)
                 {
@@ -113,7 +115,7 @@ namespace Application.UserSr
                 user.LastSeen = DateTime.UtcNow;
                 await _context.SaveChangesAsync();
 
-                var token =  GenerateJwtToken(user); 
+                var token = GenerateJwtToken(user);
 
                 return Result<string>.Success(token);
             }
@@ -248,19 +250,32 @@ namespace Application.UserSr
                 return Result<bool>.Failure($"An error occurred while checking block status: {ex.Message}");
             }
         }
-        public async Task<Result<List<UserDTO>>> SearchUsersAsync(int searchingUserId, string searchTerm)
+
+        public async Task<Result<List<UserDTO>>> SearchUsersAsync(int searchingUserId, string searchTerm, int pageNumber = 1, int pageSize = 20)
         {
             try
             {
+                if (string.IsNullOrWhiteSpace(searchTerm))
+                {
+                    return Result<List<UserDTO>>.Success(new List<UserDTO>());
+                }
+
+                var upperSearchTerm = searchTerm.ToUpper();
+
                 var blockedByUserIds = await _context.UserBlocks
                     .Where(b => b.BlockedId == searchingUserId)
                     .Select(b => b.BlockerId)
                     .ToListAsync();
 
-                var users = await _context.Users
-                    .Where(u => (u.Username.Contains(searchTerm) || u.Email.Contains(searchTerm)) &&
-                                u.Id != searchingUserId &&
-                                !blockedByUserIds.Contains(u.Id))
+                var query = _context.Users
+                    .Where(u => (u.Username.ToUpper().Contains(upperSearchTerm) || 
+                                 u.Email.ToUpper().Contains(upperSearchTerm)) &&   
+                                u.Id != searchingUserId &&                         
+                                !blockedByUserIds.Contains(u.Id));                 
+
+                var users = await query
+                    .Skip((pageNumber - 1) * pageSize)
+                    .Take(pageSize)
                     .ToListAsync();
 
                 var usersDto = users.Select(u => u.ToUserDTO()).ToList();
@@ -323,9 +338,67 @@ namespace Application.UserSr
                 return Result<List<UserDTO>>.Failure($"An error occurred while retrieving contacts: {ex.Message}");
             }
         }
+        public Result<int> GetUserIdFromToken(string token)
+        {
+            if (string.IsNullOrWhiteSpace(token))
+            {
+                return Result<int>.Failure("Token cannot be null or empty.");
+            }
 
+            var tokenHandler = new JwtSecurityTokenHandler();
+            try
+            {
+                // Validate the token (optional but recommended for full validation)
+                // This will throw if the token is invalid (e.g., expired, bad signature)
+                var principal = tokenHandler.ValidateToken(token, new TokenValidationParameters
+                {
+                    ValidateIssuerSigningKey = true,
+                    IssuerSigningKey = new SymmetricSecurityKey(Encoding.UTF8.GetBytes(_jwtSettings.Key)),
+                    ValidateIssuer = true,
+                    ValidIssuer = _jwtSettings.Issuer,
+                    ValidateAudience = true,
+                    ValidAudience = _jwtSettings.Audience,
+                    ValidateLifetime = true, // Validate token expiration
+                    ClockSkew = TimeSpan.Zero // No clock skew
+                }, out SecurityToken validatedToken);
 
+                // Ensure it's a JWT token
+                var jwtToken = validatedToken as JwtSecurityToken;
+                if (jwtToken == null)
+                {
+                    return Result<int>.Failure("Invalid JWT token format.");
+                }
 
+                // Extract the 'id' claim
+                var userIdClaim = principal.Claims.FirstOrDefault(c => c.Type == "id");
+                if (userIdClaim == null)
+                {
+                    return Result<int>.Failure("User ID claim ('id') not found in token.");
+                }
+
+                if (!int.TryParse(userIdClaim.Value, out int userId))
+                {
+                    return Result<int>.Failure("Invalid user ID format in token.");
+                }
+
+                return Result<int>.Success(userId);
+            }
+            catch (SecurityTokenExpiredException)
+            {
+                return Result<int>.Failure("Token has expired.");
+            }
+            catch (SecurityTokenValidationException ex)
+            {
+                // This catches various token validation failures (e.g., invalid signature, audience, issuer)
+                Console.WriteLine($"SecurityTokenValidationException in GetUserIdFromToken: {ex.Message}");
+                return Result<int>.Failure($"Invalid token: {ex.Message}");
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"Exception in GetUserIdFromToken: {ex}");
+                return Result<int>.Failure($"An error occurred while processing the token: {ex.Message}");
+            }
+        }
         public async Task<Result<bool>> UpdateUserStatusAsync(int userId, bool isOnline)
         {
             try
@@ -358,13 +431,101 @@ namespace Application.UserSr
                     return Result<bool>.Failure("User not found.");
                 }
 
-                user.LastSeen = DateTime.UtcNow; 
+                user.LastSeen = DateTime.UtcNow;
                 await _context.SaveChangesAsync();
                 return Result<bool>.Success(true);
             }
             catch (Exception ex)
             {
                 return Result<bool>.Failure($"Failed to update last seen: {ex.Message}");
+            }
+        }
+
+        public async Task<Result<bool>> ChangeUserPasswordAsync(int userId, ChangePasswordDTO dto)
+        {
+            try
+            {
+                var user = await _context.Users.FindAsync(userId);
+                if (user == null)
+                {
+                    return Result<bool>.Failure("User not found.");
+                }
+
+                if (!BCrypt.Net.BCrypt.Verify(dto.CurrentPassword, user.Password))
+                {
+                    return Result<bool>.Failure("Incorrect current password.");
+                }
+
+                user.Password = BCrypt.Net.BCrypt.HashPassword(dto.NewPassword);
+                await _context.SaveChangesAsync();
+                return Result<bool>.Success(true);
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"Error changing password for user {userId}: {ex}");
+                return Result<bool>.Failure($"An error occurred while changing password: {ex.Message}");
+            }
+        }
+
+        public async Task<Result<bool>> UpdateUserProfileAsync(int userId, UpdateUserDTO dto)
+        {
+            try
+            {
+                var user = await _context.Users.FindAsync(userId);
+                if (user == null)
+                {
+                    return Result<bool>.Failure("User not found.");
+                }
+
+                if (dto.Username != null)
+                {
+                    if (await _context.Users.AnyAsync(u => u.Username == dto.Username && u.Id != userId))
+                    {
+                        return Result<bool>.Failure("Username is already taken.");
+                    }
+                    user.Username = dto.Username;
+                }
+                if (dto.AvatarUrl != null)
+                {
+                    string defaultAvatarPath = "/images/default/defaultUser.png";
+
+                    if (user.AvatarUrl != null && user.AvatarUrl != defaultAvatarPath)
+                    {
+                        string oldAvatarFullPath = Path.Combine(_webRootPath, user.AvatarUrl.TrimStart('/'));
+
+                        if (File.Exists(oldAvatarFullPath))
+                        {
+                            try
+                            {
+                                File.Delete(oldAvatarFullPath);
+                                Console.WriteLine($"Deleted old avatar: {oldAvatarFullPath}");
+                            }
+                            catch (IOException ioEx)
+                            {
+                                Console.WriteLine($"Error deleting old avatar {oldAvatarFullPath}: {ioEx.Message}");
+                            }
+                            catch (Exception ex)
+                            {
+                                Console.WriteLine($"Unexpected error deleting old avatar {oldAvatarFullPath}: {ex.Message}");
+                            }
+                        }
+                    }
+                    user.AvatarUrl = dto.AvatarUrl;
+                }
+
+                if (dto.ReceiveNotifications.HasValue)
+                {
+                    user.ReceiveNotifications = dto.ReceiveNotifications.Value;
+                }
+
+                await _context.SaveChangesAsync();
+                return Result<bool>.Success(true);
+            }
+            catch (Exception ex)
+            {
+                // Log the exception
+                Console.WriteLine($"Error updating profile for user {userId}: {ex}");
+                return Result<bool>.Failure($"An error occurred while updating profile: {ex.Message}");
             }
         }
     }

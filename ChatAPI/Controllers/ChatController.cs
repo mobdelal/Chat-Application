@@ -2,6 +2,8 @@
 using Application.UserSr;
 using DTOs.ChatDTOs;
 using DTOs.MessageDTOs;
+using DTOs.Shared;
+using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Http;
 using Microsoft.AspNetCore.Mvc;
 using System.Security.Claims;
@@ -80,9 +82,67 @@ namespace ChatAPI.Controllers
 
             return BadRequest(result);
         }
+        [HttpPost("markasread")]
+        [Authorize]
+        public async Task<IActionResult> MarkMessagesAsRead([FromBody] MarkAsReadDto markAsReadDto)
+        {
+            var userIdClaim = User.FindFirst("id"); 
+            if (userIdClaim == null)
+            {
+                return Unauthorized(Result<bool>.Failure("User not authenticated."));
+            }
 
+            if (!int.TryParse(userIdClaim.Value, out int currentUserId))
+            {
+                return BadRequest(Result<bool>.Failure("Invalid user ID format."));
+            }
 
+            var result = await _chatService.MarkMessagesAsReadAsync(
+                markAsReadDto.ChatId,
+                currentUserId,
+                markAsReadDto.LastReadMessageId
+            );
 
+            if (result.IsSuccess)
+            {
+                return Ok(result);
+            }
+
+            return BadRequest(result);
+        }
+
+        [HttpGet("search")]
+        [Authorize] 
+        public async Task<IActionResult> SearchChats(
+            [FromQuery] string searchTerm,
+            [FromQuery] int pageNumber = 1,
+            [FromQuery] int pageSize = 20)
+        {
+            var userIdClaim = User.FindFirst("id");
+            if (userIdClaim == null)
+            {
+                return Unauthorized(Result<List<ChatDTO>>.Failure("User not authenticated."));
+            }
+
+            if (!int.TryParse(userIdClaim.Value, out int currentUserId))
+            {
+                return BadRequest(Result<List<ChatDTO>>.Failure("Invalid user ID format."));
+            }
+
+            if (string.IsNullOrWhiteSpace(searchTerm))
+            {
+                return Ok(Result<List<ChatDTO>>.Success(new List<ChatDTO>()));
+            }
+
+            var result = await _chatService.SearchChatsByNameAsync(searchTerm, currentUserId, pageNumber, pageSize);
+
+            if (result.IsSuccess)
+            {
+                return Ok(result);
+            }
+
+            return BadRequest(result);
+        }
     }
 }
 
