@@ -12,6 +12,8 @@
         public DateTime? EditedAt { get; set; }
 
         public bool IsDeleted { get; set; }
+        public bool IsSystemMessage { get; set; } = false; 
+
 
         public ICollection<FileAttachment> Attachments { get; set; } = new List<FileAttachment>();
         public ICollection<MessageReaction> Reactions { get; set; } = new List<MessageReaction>();

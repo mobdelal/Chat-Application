@@ -20,6 +20,13 @@ namespace Application.UserSr
         Result<int> GetUserIdFromToken(string token);
         Task<Result<bool>> ChangeUserPasswordAsync(int userId, ChangePasswordDTO dto);
         Task<Result<bool>> UpdateUserProfileAsync(int userId, UpdateUserDTO dto);
+        Task<Result<UserRelationshipStatusDTO>> GetUserRelationshipStatusAsync(
+            int userId,
+            int pageNumberBlocked = 1, 
+            int pageSizeBlocked = 10,  
+            int pageNumberRejected = 1, 
+            int pageSizeRejected = 10 
+        );
 
     }
 }

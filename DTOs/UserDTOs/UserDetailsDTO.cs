@@ -9,6 +9,8 @@
         public bool IsOnline { get; set; }
         public DateTime LastSeen { get; set; }
         public List<int> BlockedUsersIds { get; set; } = new List<int>();
+        public bool? ReceiveNotifications { get; set; }
+
     }
 
 }

@@ -29,6 +29,7 @@ namespace Mappings.UserMapping
                 AvatarUrl = user.AvatarUrl,
                 IsOnline = user.IsOnline,
                 LastSeen = user.LastSeen,
+                ReceiveNotifications = user.ReceiveNotifications,
                 BlockedUsersIds = user.BlockedUsers?.Select(b => b.BlockedId).ToList() ?? new List<int>()
             };
         }

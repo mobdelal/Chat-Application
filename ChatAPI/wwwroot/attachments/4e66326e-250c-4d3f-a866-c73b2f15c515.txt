@@ -1,0 +1,19 @@
+Dear hiring team
+I hope this email finds you well
+My name is Mohamed Abdelal and it's a pleasure to apply for the .Net developer position at your company.
+I graduated from the faculty of Engineering sohag university and studied software engineering at Information Technology institute (ITI)
+I have very good skills in learning new tools in a very fast and efficient way.
+Kindly find my attached resume for your reference.
+Appreciate your time reviewing my application And hope to have a chance to further discuss my qualifications with your good selves.
+Your sincerely 
+Mohamad Abdelal Frag
+
+
+Aspiring .NET Developer with a strong foundation in full-stack web and desktop application development. Proficient in ASP.NET Core, MVC, and Web API, with hands-on experience in building secure, scalable, and user-friendly solutions. Skilled in database design, Entity Framework, and Angular for front-end development. Adept at collaborative tools like Git, GitHub, and Trello, with a commitment to clean code and design principles. Completed a Bachelor's in Civil Engineering and an intensive code camp at ITI, Sohag. Passionate about delivering impactful projects like e-commerce platforms and contributing to innovative teams.
+
+query to remove on monster
+-- Disable constraints, then drop
+EXEC sp_MSforeachtable 'ALTER TABLE ? NOCHECK CONSTRAINT ALL';
+EXEC sp_MSforeachtable 'DROP TABLE ?';
+
+

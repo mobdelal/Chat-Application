@@ -33,32 +33,58 @@ namespace Application.ChatSR
             {
                 var now = DateTime.UtcNow;
 
-                var participantIds = dto.ParticipantIds
-                    .Distinct()
-                    .Where(id => id != dto.CreatedByUserId)
-                    .ToList();
+                var allParticipantIds = dto.ParticipantIds.Distinct().ToList();
+                if (!allParticipantIds.Contains(dto.CreatedByUserId))
+                {
+                    allParticipantIds.Add(dto.CreatedByUserId);
+                }
 
-                var users = participantIds.Any()
-                    ? await _context.Users
-                        .Where(u => participantIds.Contains(u.Id))
-                        .ToListAsync()
-                    : new List<User>();
+                var users = await _context.Users
+                    .Where(u => allParticipantIds.Contains(u.Id))
+                    .ToListAsync();
 
-                if (users.Count != participantIds.Count)
+                if (users.Count != allParticipantIds.Count)
                     return Result<ChatDTO>.Failure("Some participants are invalid users.");
 
+                var creator = users.FirstOrDefault(u => u.Id == dto.CreatedByUserId);
+                if (creator == null)
+                    return Result<ChatDTO>.Failure("Creator user not found among provided participants.");
+
+                if (!dto.IsGroup)
+                {
+
+                    var otherUserId = allParticipantIds.First(id => id != dto.CreatedByUserId);
+
+                    var existingChat = await _context.Chats
+                        .Include(c => c.Participants)
+                        .Where(c => !c.IsGroup &&
+                                    c.Participants.Any(p => p.UserId == dto.CreatedByUserId) &&
+                                    c.Participants.Any(p => p.UserId == otherUserId))
+                        .FirstOrDefaultAsync();
+
+                    if (existingChat != null)
+                    {
+                        if (existingChat.Status == ChatStatus.Active)
+                        {
+                            return Result<ChatDTO>.Success(existingChat.ToDTO(dto.CreatedByUserId));
+                        }
+                        else if (existingChat.Status == ChatStatus.Pending)
+                        {
+                            return Result<ChatDTO>.Failure("A chat invitation is already pending with this user.");
+                        }
+                        else if (existingChat.Status == ChatStatus.Rejected)
+                        {
+                            return Result<ChatDTO>.Failure("This chat was previously rejected by the other user. You cannot send messages.");
+                        }
+                    }
+                }
                 string avatarUrl = string.Empty;
 
                 if (dto.AvatarUrl != null)
                 {
                     var allowedMimeTypes = new[]
                     {
-                        "image/jpeg",
-                        "image/png",
-                        "image/gif",
-                        "image/bmp",
-                        "image/webp",
-                        "image/tiff"
+                        "image/jpeg", "image/png", "image/gif", "image/bmp", "image/webp", "image/tiff"
                     };
                     var mimeType = dto.AvatarUrl.ContentType.ToLower();
 
@@ -88,28 +114,21 @@ namespace Application.ChatSR
 
                 var chat = new Chat
                 {
-                    Name = dto.IsGroup ? dto.Name : string.Empty,
+                    Name = dto.IsGroup ? dto.Name : "", 
                     IsGroup = dto.IsGroup,
                     CreatedAt = now,
                     AvatarUrl = avatarUrl,
+                    Status = dto.IsGroup ? ChatStatus.Active : ChatStatus.Pending,
                     Participants = new List<ChatParticipant>()
                 };
 
-                chat.Participants.Add(new ChatParticipant
-                {
-                    UserId = dto.CreatedByUserId,
-                    IsAdmin = true,
-                    IsMuted = false,
-                    JoinedAt = now,
-                    IsTyping = false
-                });
-
-                foreach (var userId in participantIds)
+                foreach (var userId in allParticipantIds)
                 {
                     chat.Participants.Add(new ChatParticipant
                     {
+                        ChatId = chat.Id,
                         UserId = userId,
-                        IsAdmin = false,
+                        IsAdmin = (userId == dto.CreatedByUserId),
                         IsMuted = false,
                         JoinedAt = now,
                         IsTyping = false
@@ -119,13 +138,43 @@ namespace Application.ChatSR
                 _context.Chats.Add(chat);
                 await _context.SaveChangesAsync();
 
-                var createdChat = await _context.Chats
+                Message? systemMessage = null;
+
+                if (chat.IsGroup)
+                {
+                    string systemMessageContent = $"{creator.Username} created this group.";
+
+                    systemMessage = new Message
+                    {
+                        ChatId = chat.Id,
+                        SenderId = creator.Id,
+                        Content = systemMessageContent,
+                        SentAt = now,
+                        IsSystemMessage = true
+                    };
+                    _context.Messages.Add(systemMessage);
+                    await _context.SaveChangesAsync();
+                }
+
+                var createdChatQuery = _context.Chats
                     .Include(c => c.Participants)
                         .ThenInclude(p => p.User)
-                    .FirstOrDefaultAsync(c => c.Id == chat.Id);
+                    .AsNoTracking()
+                    .Where(c => c.Id == chat.Id);
+
+                if (systemMessage != null)
+                {
+                    createdChatQuery = createdChatQuery.Include(c => c.Messages.Where(m => m.Id == systemMessage.Id));
+                }
+                else
+                {
+                    createdChatQuery = createdChatQuery.Include(c => c.Messages);
+                }
+
+                var createdChat = await createdChatQuery.FirstOrDefaultAsync();
 
                 if (createdChat == null)
-                    return Result<ChatDTO>.Failure("Failed to load created chat.");
+                    return Result<ChatDTO>.Failure("Failed to load created chat after saving.");
 
                 foreach (var participant in createdChat.Participants)
                 {
@@ -133,20 +182,28 @@ namespace Application.ChatSR
                     foreach (var connectionId in connections)
                     {
                         await _hubContext.Groups.AddToGroupAsync(connectionId, $"Chat-{createdChat.Id}");
-                        // Pass participant.UserId as the currentUserId for the DTO being sent
+
                         await _hubContext.Clients.Client(connectionId).SendAsync("ChatCreated", createdChat.ToDTO(participant.UserId));
+
+                        if (systemMessage != null)
+                        {
+                            await _hubContext.Clients.Client(connectionId).SendAsync("ReceiveMessage", systemMessage.ToDTO());
+                        }
                     }
                 }
 
-                // For the result, you can use the createdByUserId as the current user context
                 return Result<ChatDTO>.Success(createdChat.ToDTO(dto.CreatedByUserId));
             }
             catch (Exception ex)
             {
+                Console.WriteLine($"Error in CreateChatAsync: {ex.Message}");
+                if (ex.InnerException != null)
+                {
+                    Console.WriteLine($"Inner Exception: {ex.InnerException.Message}");
+                }
                 return Result<ChatDTO>.Failure($"An error occurred while creating the chat: {ex.Message}");
             }
         }
-
         public async Task<Result<List<MessageDTO>>> GetChatMessagesAsync(int chatId, int? lastMessageId = null, int pageSize = 50)
         {
             try
@@ -154,7 +211,7 @@ namespace Application.ChatSR
                 if (pageSize < 1 || pageSize > 100) pageSize = 50;
 
                 var query = _context.Messages
-                    .Where(m => m.ChatId == chatId && !m.IsDeleted); 
+                    .Where(m => m.ChatId == chatId && !m.IsDeleted);
 
                 if (lastMessageId.HasValue)
                 {
@@ -163,7 +220,7 @@ namespace Application.ChatSR
                         .Select(m => m.SentAt)
                         .FirstOrDefaultAsync();
 
-                    if (lastMessageSentAt != default) 
+                    if (lastMessageSentAt != default)
                     {
 
                         query = query.Where(m => m.SentAt < lastMessageSentAt || (m.SentAt == lastMessageSentAt && m.Id < lastMessageId.Value));
@@ -189,7 +246,7 @@ namespace Application.ChatSR
             }
             catch (Exception ex)
             {
-                Console.WriteLine($"Exception in GetChatMessagesAsync: {ex}"); 
+                Console.WriteLine($"Exception in GetChatMessagesAsync: {ex}");
                 return Result<List<MessageDTO>>.Failure($"Failed to load chat messages: {ex.Message}");
             }
         }
@@ -202,15 +259,14 @@ namespace Application.ChatSR
                 var chat = await _context.Chats
                     .Include(c => c.Participants)
                         .ThenInclude(p => p.User)
-                    // Start the single Include chain for Messages
                     .Include(c => c.Messages
-                        .Where(m => !m.IsDeleted) 
-                        .OrderByDescending(m => m.SentAt) 
-                        .Take(initialMessagePageSize))    
-                        .ThenInclude(m => m.Sender)      
-                    .Include(c => c.Messages)      
+                        .Where(m => !m.IsDeleted)
+                        .OrderByDescending(m => m.SentAt)
+                        .Take(initialMessagePageSize))
+                        .ThenInclude(m => m.Sender)
+                    .Include(c => c.Messages)
                         .ThenInclude(m => m.Attachments)
-                    .Include(c => c.Messages)        
+                    .Include(c => c.Messages)
                         .ThenInclude(m => m.Reactions)
                     .FirstOrDefaultAsync(c => c.Id == chatId);
 
@@ -237,7 +293,7 @@ namespace Application.ChatSR
 
                 if (chatDTO.Messages != null && chatDTO.Messages.Any())
                 {
-                    chatDTO.Messages = chatDTO.Messages.OrderBy(m => m.SentAt).ToList(); 
+                    chatDTO.Messages = chatDTO.Messages.OrderBy(m => m.SentAt).ToList();
                 }
 
 
@@ -256,36 +312,56 @@ namespace Application.ChatSR
                 if (pageNumber < 1) pageNumber = 1;
                 if (pageSize < 1 || pageSize > 100) pageSize = 20;
 
-                // Step 1: Query the chats with all necessary related data using Includes.
-                // This ensures all the data needed for DTO mapping is loaded efficiently.
-                var chats = await _context.Chats
-                    .AsNoTracking() // Optimize for read-only query
-                    .Where(c => c.Participants.Any(p => p.UserId == userId))
-                    .Include(c => c.Participants) // Include participants
-                        .ThenInclude(p => p.User) // Then include user details for participants
+                var query = _context.Chats
+                    .AsNoTracking()
+                    .Where(c => c.Participants.Any(p => p.UserId == userId));
 
-                    // Include Messages with their Sender, Attachments, and Reactions.
-                    // We're loading ALL messages here that are related to the chats being fetched.
-                    // IMPORTANT: This can still be a LOT of data if chats have many messages.
-                    // We'll address the 'last message' and 'unread count' in memory for performance.
-                    .Include(c => c.Messages.Where(m => !m.IsDeleted)) // Load only non-deleted messages
+                var chatsWithLatestActivity = await query
+                    .Select(chat => new
+                    {
+                        Chat = chat,
+                        LatestActivityDate = chat.Messages.Any(m => !m.IsDeleted)
+                                             ? chat.Messages.Where(m => !m.IsDeleted).Max(m => m.SentAt)
+                                             : chat.CreatedAt
+                    })
+                    .OrderByDescending(x => x.LatestActivityDate)
+                    .Skip((pageNumber - 1) * pageSize)
+                    .Take(pageSize)
+                    .ToListAsync();
+
+                var chatIds = chatsWithLatestActivity.Select(x => x.Chat.Id).ToList();
+
+                if (!chatIds.Any())
+                {
+                    return Result<List<ChatDTO>>.Success(new List<ChatDTO>());
+                }
+
+                var chats = await _context.Chats
+                    .AsNoTracking()
+                    .Where(c => chatIds.Contains(c.Id))
+                    .Include(c => c.Participants)
+                        .ThenInclude(p => p.User)
+                    .Include(c => c.Messages.Where(m => !m.IsDeleted))
                         .ThenInclude(m => m.Sender)
                     .Include(c => c.Messages.Where(m => !m.IsDeleted))
                         .ThenInclude(m => m.Attachments)
+                    // If you need reactions for lastMessage preview, include them
                     .Include(c => c.Messages.Where(m => !m.IsDeleted))
                         .ThenInclude(m => m.Reactions)
-                    // If you want to order by last message for initial pagination, it gets complex.
-                    // For simplicity, we'll order by CreatedAt for pagination and then re-sort DTOs.
-                    .OrderByDescending(c => c.CreatedAt) // Order chats by creation for initial pagination
-                    .Skip((pageNumber - 1) * pageSize)
-                    .Take(pageSize)
-                    .ToListAsync(); // Execute query and bring data into memory
+                    .ToListAsync();
 
-                // Step 2: Perform client-side mapping to DTOs.
-                // All data (chat, participants, messages, their relations) is now in memory.
+                var orderedChats = chatsWithLatestActivity
+                    .Join(chats,
+                          activity => activity.Chat.Id,
+                          fullChat => fullChat.Id,
+                          (activity, fullChat) => new { fullChat, activity.LatestActivityDate })
+                    .OrderByDescending(x => x.LatestActivityDate)
+                    .Select(x => x.fullChat)
+                    .ToList();
+
                 var chatDTOs = new List<ChatDTO>();
 
-                foreach (var chat in chats)
+                foreach (var chat in orderedChats) // Iterate through the ordered chats
                 {
                     var currentUserParticipant = chat.Participants
                         .FirstOrDefault(p => p.UserId == userId);
@@ -293,14 +369,18 @@ namespace Application.ChatSR
                     // Calculate UnreadCount
                     var unreadCount = chat.Messages
                         .Count(m => (currentUserParticipant?.LastReadAt == null || m.SentAt > currentUserParticipant.LastReadAt)
-                                     && m.SenderId != userId);
+                                     && m.SenderId != userId && !m.IsDeleted); // Added !m.IsDeleted check
 
                     // Get LastMessage
                     var lastMessage = chat.Messages
+                        .Where(m => !m.IsDeleted) // Ensure it's not a deleted message
                         .OrderByDescending(m => m.SentAt)
-                        .FirstOrDefault(); // This message entity should have its sender, attachments, reactions loaded
+                        .FirstOrDefault();
 
-                    // Create ChatDTO
+                    var createdByUserId = chat.Participants.FirstOrDefault(p => p.IsAdmin)?.UserId ?? 0;
+
+
+
                     var dto = new ChatDTO
                     {
                         Id = chat.Id,
@@ -308,26 +388,43 @@ namespace Application.ChatSR
                         AvatarUrl = chat.AvatarUrl,
                         IsGroup = chat.IsGroup,
                         CreatedAt = chat.CreatedAt,
+                        Status = chat.Status,
+                        CreatedByUserId = createdByUserId, 
                         Participants = chat.Participants?.Select(p => new ChatParticipantDTO
                         {
                             UserId = p.UserId,
-                            Username = p.User?.Username ?? "", // Ensure p.User is not null
+                            Username = p.User?.Username ?? "",
                             AvatarUrl = p.User?.AvatarUrl,
                             IsAdmin = p.IsAdmin,
                             JoinedAt = p.JoinedAt
                         }).ToList() ?? new(),
-                        Messages = new List<MessageDTO>(), // Always empty for chat list view DTO
+                        Messages = new List<MessageDTO>(),
                         UnreadCount = unreadCount,
-                        LastMessage = lastMessage?.ToDTO() // Map the last message entity to its DTO
+                        LastMessage = lastMessage?.ToDTO()
                     };
+
+                    if (!dto.IsGroup)
+                    {
+                        var otherParticipant = dto.Participants.FirstOrDefault(p => p.UserId != userId);
+
+                        dto.Name = otherParticipant?.Username ?? "Unknown User";
+                        dto.AvatarUrl = otherParticipant?.AvatarUrl;
+
+                        if (string.IsNullOrEmpty(dto.AvatarUrl))
+                        {
+                            dto.AvatarUrl = "/images/default/defaultUser.png";
+                        }
+                    }
+                    else
+                    {
+                        if (string.IsNullOrEmpty(dto.AvatarUrl))
+                        {
+                            dto.AvatarUrl = "/images/default/groupImage.png";
+                        }
+                    }
+
                     chatDTOs.Add(dto);
                 }
-
-                // Step 3: Re-sort the DTOs by LastMessage.SentAt for frontend display.
-                // This re-sorts the already paginated list based on most recent activity.
-                chatDTOs = chatDTOs
-                    .OrderByDescending(dto => dto.LastMessage?.SentAt ?? dto.CreatedAt)
-                    .ToList();
 
                 return Result<List<ChatDTO>>.Success(chatDTOs);
             }
@@ -527,15 +624,15 @@ namespace Application.ChatSR
         public async Task<int> GetUnreadMessageCountForChatAsync(int chatId, int userId)
         {
             var participant = await _context.ChatParticipants
-                .AsNoTracking() 
+                .AsNoTracking()
                 .FirstOrDefaultAsync(cp => cp.ChatId == chatId && cp.UserId == userId);
 
-            if (participant == null) return 0; 
+            if (participant == null) return 0;
 
             var unreadCount = await _context.Messages
                 .Where(m => m.ChatId == chatId &&
                             m.SentAt > participant.JoinedAt &&
-                            m.SenderId != userId && 
+                            m.SenderId != userId &&
                             (!participant.LastReadMessageId.HasValue || m.Id > participant.LastReadMessageId.Value))
                 .CountAsync();
 
@@ -555,7 +652,7 @@ namespace Application.ChatSR
             {
                 var unreadCountInChat = await _context.Messages
                     .Where(m => m.ChatId == chatParticipant.ChatId &&
-                                m.SentAt > chatParticipant.JoinedAt && 
+                                m.SentAt > chatParticipant.JoinedAt &&
                                 (!chatParticipant.LastReadMessageId.HasValue || m.Id > chatParticipant.LastReadMessageId.Value))
                     .CountAsync();
                 totalUnreadCount += unreadCountInChat;
@@ -675,7 +772,7 @@ namespace Application.ChatSR
                 if (!participant.LastReadMessageId.HasValue || lastReadMessageId > participant.LastReadMessageId.Value)
                 {
                     participant.LastReadMessageId = lastReadMessageId;
-                    participant.LastReadAt = DateTime.UtcNow; 
+                    participant.LastReadAt = DateTime.UtcNow;
                     await _context.SaveChangesAsync();
                 }
 
@@ -687,7 +784,6 @@ namespace Application.ChatSR
                 return Result<bool>.Failure($"An error occurred while marking messages as read: {ex.Message}");
             }
         }
-
         public async Task<Result<List<ChatDTO>>> SearchChatsByNameAsync(string searchTerm, int userId, int pageNumber = 1, int pageSize = 20)
         {
             try
@@ -695,19 +791,26 @@ namespace Application.ChatSR
                 if (pageNumber < 1) pageNumber = 1;
                 if (pageSize < 1 || pageSize > 100) pageSize = 20;
 
-                // Ensure the search term is not null or empty
                 if (string.IsNullOrWhiteSpace(searchTerm))
                 {
                     return Result<List<ChatDTO>>.Success(new List<ChatDTO>()); // Return empty list if no search term
                 }
 
-                // Convert search term to lowercase for case-insensitive search
                 var lowerSearchTerm = searchTerm.ToLower();
 
-                var chats = await _context.Chats
+                var query = _context.Chats
                     .AsNoTracking()
-                    .Where(c => c.Participants.Any(p => p.UserId == userId) &&
-                                (c.Name != null && c.Name.ToLower().Contains(lowerSearchTerm)))
+                    // Filter chats where the current user is a participant
+                    .Where(c => c.Participants.Any(p => p.UserId == userId));
+
+                var filteredChats = await query
+                    .Where(c =>
+                        (c.IsGroup && c.Name != null && c.Name.ToLower().Contains(lowerSearchTerm)) || // Search group chat name
+                        (!c.IsGroup && c.Participants.Any(p =>
+                            p.UserId != userId && // Exclude the current user's participant entry
+                            p.User != null && p.User.Username.ToLower().Contains(lowerSearchTerm) // Search other participant's username
+                        ))
+                    )
                     .Include(c => c.Participants)
                         .ThenInclude(p => p.User)
                     .Include(c => c.Messages.Where(m => !m.IsDeleted)) // Load only non-deleted messages
@@ -716,48 +819,22 @@ namespace Application.ChatSR
                         .ThenInclude(m => m.Attachments)
                     .Include(c => c.Messages.Where(m => !m.IsDeleted))
                         .ThenInclude(m => m.Reactions)
-                    .OrderByDescending(c => c.CreatedAt) // Order by creation date, or consider a relevancy score if needed
+                    .OrderByDescending(c => c.CreatedAt) // Order by creation date initially
                     .Skip((pageNumber - 1) * pageSize)
                     .Take(pageSize)
                     .ToListAsync();
 
                 var chatDTOs = new List<ChatDTO>();
 
-                foreach (var chat in chats)
+                foreach (var chat in filteredChats)
                 {
-                    var currentUserParticipant = chat.Participants
-                        .FirstOrDefault(p => p.UserId == userId);
+                    // Utilize the ToDTO mapping extension (which handles the one-to-one name logic)
+                    var chatDto = chat.ToDTO(userId);
 
-                    var unreadCount = chat.Messages
-                        .Count(m => (currentUserParticipant?.LastReadAt == null || m.SentAt > currentUserParticipant.LastReadAt)
-                                     && m.SenderId != userId);
-
-                    var lastMessage = chat.Messages
-                        .OrderByDescending(m => m.SentAt)
-                        .FirstOrDefault();
-
-                    var dto = new ChatDTO
-                    {
-                        Id = chat.Id,
-                        Name = chat.Name,
-                        AvatarUrl = chat.AvatarUrl,
-                        IsGroup = chat.IsGroup,
-                        CreatedAt = chat.CreatedAt,
-                        Participants = chat.Participants?.Select(p => new ChatParticipantDTO
-                        {
-                            UserId = p.UserId,
-                            Username = p.User?.Username ?? "",
-                            AvatarUrl = p.User?.AvatarUrl,
-                            IsAdmin = p.IsAdmin,
-                            JoinedAt = p.JoinedAt
-                        }).ToList() ?? new(),
-                        Messages = new List<MessageDTO>(), 
-                        UnreadCount = unreadCount,
-                        LastMessage = lastMessage?.ToDTO()
-                    };
-                    chatDTOs.Add(dto);
+                    chatDTOs.Add(chatDto);
                 }
 
+                // Final ordering by latest activity date, as done in GetUserChatsAsync
                 chatDTOs = chatDTOs
                     .OrderByDescending(dto => dto.LastMessage?.SentAt ?? dto.CreatedAt)
                     .ToList();
@@ -766,9 +843,107 @@ namespace Application.ChatSR
             }
             catch (Exception ex)
             {
+                // Log the full exception for debugging
                 Console.WriteLine($"Exception in SearchChatsByNameAsync: {ex}");
                 return Result<List<ChatDTO>>.Failure($"An error occurred while searching for chats: {ex.Message}");
             }
         }
+        public async Task<Result<bool>> UpdateChatStatusAsync(UpdateChatStatusDTO dto) 
+        {
+            try
+            {
+                var chat = await _context.Chats
+                    .Include(c => c.Participants)
+                        .ThenInclude(p => p.User)
+                    .FirstOrDefaultAsync(c => c.Id == dto.ChatId);
+
+                if (chat == null)
+                {
+                    return Result<bool>.Failure("Chat not found."); // <--- CHANGED
+                }
+
+                // 1. Basic Validations
+                if (chat.IsGroup)
+                {
+                    return Result<bool>.Failure("Chat status can only be changed for one-on-one chats."); // <--- CHANGED
+                }
+
+                if (chat.Status != ChatStatus.Pending)
+                {
+                    return Result<bool>.Failure($"Chat is not in a '{ChatStatus.Pending}' state. Current status: {chat.Status}."); // <--- CHANGED
+                }
+
+                if (dto.NewStatus != ChatStatus.Active && dto.NewStatus != ChatStatus.Rejected)
+                {
+                    return Result<bool>.Failure("Invalid new status. Only 'Active' or 'Rejected' are allowed for updates."); // <--- CHANGED
+                }
+
+                // 2. Authorization: Ensure the user updating the status is the *recipient* of the invitation
+                var creatorId = chat.Participants.FirstOrDefault(p => p.IsAdmin)?.UserId;
+                if (!creatorId.HasValue)
+                {
+                    creatorId = chat.Participants.OrderBy(p => p.JoinedAt).FirstOrDefault()?.UserId;
+                }
+
+                if (dto.UserId == creatorId)
+                {
+                    return Result<bool>.Failure("Only the recipient of the chat invitation can accept or reject it."); 
+                }
+
+                if (!chat.Participants.Any(p => p.UserId == dto.UserId))
+                {
+                    return Result<bool>.Failure("User is not a participant in this chat."); // <--- CHANGED
+                }
+
+                // 3. Update Status
+                chat.Status = dto.NewStatus;
+                await _context.SaveChangesAsync();
+
+                // Get the updated DTO to send via SignalR
+                var updatedChatDto = chat.ToDTO(dto.UserId);
+
+                string notificationMessage = string.Empty;
+                if (dto.NewStatus == ChatStatus.Active)
+                {
+                    var accepter = chat.Participants.FirstOrDefault(p => p.UserId == dto.UserId)?.User;
+                    notificationMessage = $"{accepter?.Username ?? "The user"} accepted the chat invitation.";
+                }
+                else if (dto.NewStatus == ChatStatus.Rejected)
+                {
+                    var rejecter = chat.Participants.FirstOrDefault(p => p.UserId == dto.UserId)?.User;
+                    notificationMessage = $"{rejecter?.Username ?? "The user"} rejected the chat invitation. This chat is now blocked.";
+                }
+
+                foreach (var participant in chat.Participants)
+                {
+                    var connections = _connectionMappingService.GetConnections(participant.UserId);
+                    foreach (var connectionId in connections)
+                    {
+                        // Send updated chat object (with new status)
+                        await _hubContext.Clients.Client(connectionId).SendAsync("ChatStatusUpdated", updatedChatDto);
+
+                        // Send a system message about the action
+                        await _hubContext.Clients.Client(connectionId).SendAsync("ReceiveSystemMessage", new
+                        {
+                            ChatId = chat.Id,
+                            Content = notificationMessage,
+                            SentAt = DateTime.UtcNow,
+                            IsSystemMessage = true
+                        });
+                    }
+                }
+
+                return Result<bool>.Success(true); 
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"Error in UpdateChatStatusAsync: {ex.Message}");
+                if (ex.InnerException != null)
+                {
+                    Console.WriteLine($"Inner Exception: {ex.InnerException.Message}");
+                }
+                return Result<bool>.Failure($"An error occurred while updating chat status: {ex.Message}"); 
+            }
+        }
     }
-}
+}    

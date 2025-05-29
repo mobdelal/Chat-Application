@@ -33,13 +33,23 @@ namespace ChatAPI.Controllers
             return Ok(result);
         }
 
-        [HttpGet("{id}")]
-        public async Task<IActionResult> GetUserDetails(int id)
+        [Authorize] 
+        [HttpGet("me")] 
+        public async Task<IActionResult> GetCurrentUserDetails()
         {
-            var result = await _userService.GetUserDetailsByIdAsync(id);
+            var userIdClaim = User.FindFirst("id");
+            if (userIdClaim == null || !int.TryParse(userIdClaim.Value, out int userId))
+            {
+
+                return Unauthorized(Result<UserDetailsDTO>.Failure("User ID not found in token or invalid format."));
+            }
+
+            var result = await _userService.GetUserDetailsByIdAsync(userId); // Call your service with the token's userId
 
             if (!result.IsSuccess)
+            {
                 return NotFound(result);
+            }
 
             return Ok(result);
         }
@@ -70,8 +80,6 @@ namespace ChatAPI.Controllers
             {
                 return BadRequest(Result<List<UserDTO>>.Failure("Invalid user ID format."));
             }
-
-
             var result = await _userService.SearchUsersAsync(searchingUserId, searchTerm, pageNumber, pageSize);
 
             if (!result.IsSuccess)
@@ -103,7 +111,7 @@ namespace ChatAPI.Controllers
 
         [Authorize] 
         [HttpPut("profile")]
-        public async Task<IActionResult> UpdateProfile([FromBody] UpdateUserDTO dto)
+        public async Task<IActionResult> UpdateProfile([FromForm] UpdateUserDTO dto)
         {
             var userIdClaim = User.FindFirst("id");
             if (userIdClaim == null || !int.TryParse(userIdClaim.Value, out int userId))
@@ -119,6 +127,33 @@ namespace ChatAPI.Controllers
             }
 
             return Ok(result);
+        }
+        [HttpGet("relationship-status")]
+        public async Task<IActionResult> GetUserRelationshipStatus(
+                  [FromQuery] int pageNumberBlocked = 1,
+                  [FromQuery] int pageSizeBlocked = 10,
+                  [FromQuery] int pageNumberRejected = 1,
+                  [FromQuery] int pageSizeRejected = 10)
+        {
+            var userIdClaim = User.FindFirst("id");
+            if (userIdClaim == null || !int.TryParse(userIdClaim.Value, out int userId))
+            {
+                return Unauthorized(Result<UserRelationshipStatusDTO>.Failure("User ID not found in token or invalid format."));
+            }
+
+            var result = await _userService.GetUserRelationshipStatusAsync(
+                userId,
+                pageNumberBlocked,
+                pageSizeBlocked,
+                pageNumberRejected,
+                pageSizeRejected
+            );
+
+            if (result.IsSuccess)
+            {
+                return Ok(result);
+            }
+            return BadRequest(result);
         }
     }
 }

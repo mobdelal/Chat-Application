@@ -13,6 +13,10 @@ using System.Linq;
 using System.Security.Claims;
 using System.Text;
 using System.Threading.Tasks;
+using System.IO;
+using DTOs.ChatDTOs;
+using Mappings.ChatMappings;
+
 
 namespace Application.UserSr
 {
@@ -26,8 +30,7 @@ namespace Application.UserSr
         {
             _context = context;
             _jwtSettings = jwtSettings.Value;
-            _webRootPath = Path.Combine(Directory.GetCurrentDirectory(), "wwwroot"); 
-
+            _webRootPath = Path.Combine(Directory.GetCurrentDirectory(), "wwwroot");
         }
 
         public async Task<Result<UserDTO>> RegisterAsync(RegisterDTO dto)
@@ -61,7 +64,8 @@ namespace Application.UserSr
                     }
 
                     var fileName = Guid.NewGuid() + "_" + dto.Avatar.FileName;
-                    string uploadFolder = Path.Combine(Directory.GetCurrentDirectory(), "wwwroot/images/avatars");
+                    // Use _webRootPath for consistency and correct base path
+                    string uploadFolder = Path.Combine(_webRootPath, "images", "avatars");
 
                     Directory.CreateDirectory(uploadFolder);
 
@@ -97,6 +101,7 @@ namespace Application.UserSr
                 return Result<UserDTO>.Failure($"An error occurred during registration: {ex.Message}");
             }
         }
+
         public async Task<Result<string>> LoginAsync(LoginDTO dto)
         {
             try
@@ -124,6 +129,7 @@ namespace Application.UserSr
                 return Result<string>.Failure($"An error occurred during login: {ex.Message}");
             }
         }
+
         private string GenerateJwtToken(User user)
         {
             var claims = new List<Claim>
@@ -147,6 +153,7 @@ namespace Application.UserSr
 
             return new JwtSecurityTokenHandler().WriteToken(token);
         }
+
         public async Task<Result<UserDetailsDTO>> GetUserDetailsByIdAsync(int userId)
         {
             try
@@ -165,6 +172,7 @@ namespace Application.UserSr
                 return Result<UserDetailsDTO>.Failure($"An error occurred while retrieving user details: {ex.Message}");
             }
         }
+
         public async Task<Result<bool>> BlockUserAsync(int userId, int blockUserId)
         {
             try
@@ -201,6 +209,7 @@ namespace Application.UserSr
                 return Result<bool>.Failure($"An error occurred while blocking the user: {ex.Message}");
             }
         }
+
         public async Task<Result<List<UserDTO>>> GetBlockedUsersAsync(int userId)
         {
             try
@@ -219,6 +228,7 @@ namespace Application.UserSr
                 return Result<List<UserDTO>>.Failure($"An error occurred while retrieving blocked users: {ex.Message}");
             }
         }
+
         public async Task<Result<UserDTO>> GetUserByUsernameAsync(string username)
         {
             try
@@ -236,6 +246,7 @@ namespace Application.UserSr
                 return Result<UserDTO>.Failure($"An error occurred while retrieving the user: {ex.Message}");
             }
         }
+
         public async Task<Result<bool>> IsUserBlockedAsync(int userId, int otherUserId)
         {
             try
@@ -262,16 +273,24 @@ namespace Application.UserSr
 
                 var upperSearchTerm = searchTerm.ToUpper();
 
+                // IDs of users who have blocked the current searchingUserId
                 var blockedByUserIds = await _context.UserBlocks
                     .Where(b => b.BlockedId == searchingUserId)
                     .Select(b => b.BlockerId)
                     .ToListAsync();
 
+                // IDs of users that the current searchingUserId has blocked
+                var usersBlockedByCurrentUserIds = await _context.UserBlocks
+                    .Where(b => b.BlockerId == searchingUserId)
+                    .Select(b => b.BlockedId)
+                    .ToListAsync();
+
                 var query = _context.Users
-                    .Where(u => (u.Username.ToUpper().Contains(upperSearchTerm) || 
-                                 u.Email.ToUpper().Contains(upperSearchTerm)) &&   
-                                u.Id != searchingUserId &&                         
-                                !blockedByUserIds.Contains(u.Id));                 
+                    .Where(u => (u.Username.ToUpper().Contains(upperSearchTerm) ||
+                                  u.Email.ToUpper().Contains(upperSearchTerm)) &&
+                                 u.Id != searchingUserId &&
+                                 !blockedByUserIds.Contains(u.Id) &&
+                                 !usersBlockedByCurrentUserIds.Contains(u.Id));
 
                 var users = await query
                     .Skip((pageNumber - 1) * pageSize)
@@ -284,7 +303,8 @@ namespace Application.UserSr
             }
             catch (Exception ex)
             {
-                return Result<List<UserDTO>>.Failure($"An error occurred while searching users: {ex.Message}");
+                Console.WriteLine($"Error in SearchUsersAsync: {ex.Message} - {ex.StackTrace}");
+                return Result<List<UserDTO>>.Failure($"An error occurred while searching users. Please try again later.");
             }
         }
         public async Task<Result<bool>> UnblockUserAsync(int userId, int unblockUserId)
@@ -307,6 +327,7 @@ namespace Application.UserSr
                 return Result<bool>.Failure($"An error occurred while unblocking the user: {ex.Message}");
             }
         }
+
         public async Task<Result<List<UserDTO>>> GetContactsAsync(int userId)
         {
             try
@@ -338,6 +359,7 @@ namespace Application.UserSr
                 return Result<List<UserDTO>>.Failure($"An error occurred while retrieving contacts: {ex.Message}");
             }
         }
+
         public Result<int> GetUserIdFromToken(string token)
         {
             if (string.IsNullOrWhiteSpace(token))
@@ -348,8 +370,6 @@ namespace Application.UserSr
             var tokenHandler = new JwtSecurityTokenHandler();
             try
             {
-                // Validate the token (optional but recommended for full validation)
-                // This will throw if the token is invalid (e.g., expired, bad signature)
                 var principal = tokenHandler.ValidateToken(token, new TokenValidationParameters
                 {
                     ValidateIssuerSigningKey = true,
@@ -358,18 +378,16 @@ namespace Application.UserSr
                     ValidIssuer = _jwtSettings.Issuer,
                     ValidateAudience = true,
                     ValidAudience = _jwtSettings.Audience,
-                    ValidateLifetime = true, // Validate token expiration
-                    ClockSkew = TimeSpan.Zero // No clock skew
+                    ValidateLifetime = true,
+                    ClockSkew = TimeSpan.Zero
                 }, out SecurityToken validatedToken);
 
-                // Ensure it's a JWT token
                 var jwtToken = validatedToken as JwtSecurityToken;
                 if (jwtToken == null)
                 {
                     return Result<int>.Failure("Invalid JWT token format.");
                 }
 
-                // Extract the 'id' claim
                 var userIdClaim = principal.Claims.FirstOrDefault(c => c.Type == "id");
                 if (userIdClaim == null)
                 {
@@ -389,7 +407,6 @@ namespace Application.UserSr
             }
             catch (SecurityTokenValidationException ex)
             {
-                // This catches various token validation failures (e.g., invalid signature, audience, issuer)
                 Console.WriteLine($"SecurityTokenValidationException in GetUserIdFromToken: {ex.Message}");
                 return Result<int>.Failure($"Invalid token: {ex.Message}");
             }
@@ -399,6 +416,7 @@ namespace Application.UserSr
                 return Result<int>.Failure($"An error occurred while processing the token: {ex.Message}");
             }
         }
+
         public async Task<Result<bool>> UpdateUserStatusAsync(int userId, bool isOnline)
         {
             try
@@ -410,7 +428,6 @@ namespace Application.UserSr
                 }
 
                 user.IsOnline = isOnline;
-
 
                 await _context.SaveChangesAsync();
                 return Result<bool>.Success(true);
@@ -485,14 +502,30 @@ namespace Application.UserSr
                     }
                     user.Username = dto.Username;
                 }
-                if (dto.AvatarUrl != null)
-                {
-                    string defaultAvatarPath = "/images/default/defaultUser.png";
 
-                    if (user.AvatarUrl != null && user.AvatarUrl != defaultAvatarPath)
+                if (dto.AvatarFile != null)
+                {
+                    var allowedMimeTypes = new[]
+                    {
+                        "image/jpeg", "image/png", "image/gif", "image/bmp", "image/webp", "image/tiff"
+                    };
+                    var mimeType = dto.AvatarFile.ContentType.ToLower();
+
+                    if (!allowedMimeTypes.Contains(mimeType))
+                    {
+                        return Result<bool>.Failure("Invalid file type. Please upload an image file (JPEG, PNG, GIF, BMP, WEBP, TIFF).");
+                    }
+
+                    string uploadsFolder = Path.Combine(_webRootPath, "images", "avatars");
+                    if (!Directory.Exists(uploadsFolder))
+                    {
+                        Directory.CreateDirectory(uploadsFolder);
+                    }
+
+                    string defaultAvatarPath = "/images/default/defaultUser.png";
+                    if (!string.IsNullOrEmpty(user.AvatarUrl) && user.AvatarUrl != defaultAvatarPath)
                     {
                         string oldAvatarFullPath = Path.Combine(_webRootPath, user.AvatarUrl.TrimStart('/'));
-
                         if (File.Exists(oldAvatarFullPath))
                         {
                             try
@@ -510,7 +543,16 @@ namespace Application.UserSr
                             }
                         }
                     }
-                    user.AvatarUrl = dto.AvatarUrl;
+
+                    string uniqueFileName = Guid.NewGuid().ToString() + "_" + Path.GetFileName(dto.AvatarFile.FileName);
+                    string filePath = Path.Combine(uploadsFolder, uniqueFileName);
+
+                    using (var fileStream = new FileStream(filePath, FileMode.Create))
+                    {
+                        await dto.AvatarFile.CopyToAsync(fileStream);
+                    }
+
+                    user.AvatarUrl = "/images/avatars/" + uniqueFileName;
                 }
 
                 if (dto.ReceiveNotifications.HasValue)
@@ -523,9 +565,93 @@ namespace Application.UserSr
             }
             catch (Exception ex)
             {
-                // Log the exception
                 Console.WriteLine($"Error updating profile for user {userId}: {ex}");
                 return Result<bool>.Failure($"An error occurred while updating profile: {ex.Message}");
+            }
+        }
+
+        public async Task<Result<UserRelationshipStatusDTO>> GetUserRelationshipStatusAsync(
+                   int userId,
+                   int pageNumberBlocked = 1,
+                   int pageSizeBlocked = 10,
+                   int pageNumberRejected = 1,
+                   int pageSizeRejected = 10)
+        {
+            try
+            {
+                // Validate pagination parameters
+                if (pageNumberBlocked < 1) pageNumberBlocked = 1;
+                if (pageSizeBlocked < 1 || pageSizeBlocked > 50) pageSizeBlocked = 10; // Adjust max page size as needed
+                if (pageNumberRejected < 1) pageNumberRejected = 1;
+                if (pageSizeRejected < 1 || pageSizeRejected > 50) pageSizeRejected = 10; // Adjust max page size as needed
+
+                // --- Blocked Users ---
+                var blockedUsersQuery = _context.UserBlocks
+                    .AsNoTracking()
+                    .Where(ub => ub.BlockerId == userId);
+
+                // Get total count BEFORE applying Skip/Take for pagination metadata
+                var totalBlockedUsers = await blockedUsersQuery.CountAsync();
+
+                var blockedUserIds = await blockedUsersQuery
+                    .Select(ub => ub.BlockedId)
+                    .Skip((pageNumberBlocked - 1) * pageSizeBlocked) // Apply pagination
+                    .Take(pageSizeBlocked)                             // Apply pagination
+                    .ToListAsync();
+
+                var blockedUsersDTOs = new List<UserDTO>();
+                if (blockedUserIds.Any())
+                {
+                    blockedUsersDTOs = await _context.Users
+                        .AsNoTracking()
+                        .Where(u => blockedUserIds.Contains(u.Id))
+                        .Select(u => u.ToUserDTO())
+                        .ToListAsync();
+                }
+
+
+                var rejectedChatsQuery = _context.Chats
+                    .AsNoTracking()
+                    .Where(c => c.Participants.Any(p => p.UserId == userId && c.Status == ChatStatus.Rejected))
+                    .Where(c => !c.Participants.Any(p => p.UserId == userId && p.IsAdmin)); // Filter for non-admin rejected chats
+
+                // Get total count BEFORE applying Skip/Take
+                var totalRejectedChats = await rejectedChatsQuery.CountAsync();
+
+                var rejectedChatsPaged = await rejectedChatsQuery
+                    .OrderByDescending(c => c.CreatedAt) // Order by creation date or last activity for consistency
+                    .Skip((pageNumberRejected - 1) * pageSizeRejected) // Apply pagination
+                    .Take(pageSizeRejected)                               // Apply pagination
+                    .Include(c => c.Participants)
+                        .ThenInclude(p => p.User)
+                    .Include(c => c.Messages.Where(m => !m.IsDeleted))
+                        .ThenInclude(m => m.Sender)
+                    .Include(c => c.Messages.Where(m => !m.IsDeleted))
+                        .ThenInclude(m => m.Attachments)
+                    .Include(c => c.Messages.Where(m => !m.IsDeleted))
+                        .ThenInclude(m => m.Reactions)
+                    .ToListAsync();
+
+                var rejectedChatDTOs = new List<ChatDTO>();
+                foreach (var chat in rejectedChatsPaged) // Iterate through the Paged results
+                {
+                    rejectedChatDTOs.Add(chat.ToDTO(userId));
+                }
+
+                var resultDTO = new UserRelationshipStatusDTO
+                {
+                    BlockedUsers = blockedUsersDTOs,
+                    TotalBlockedUsers = totalBlockedUsers, // Set total count
+                    RejectedChats = rejectedChatDTOs,
+                    TotalRejectedChats = totalRejectedChats // Set total count
+                };
+
+                return Result<UserRelationshipStatusDTO>.Success(resultDTO);
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"Exception in GetUserRelationshipStatusAsync: {ex}");
+                return Result<UserRelationshipStatusDTO>.Failure($"An error occurred while fetching relationship status: {ex.Message}");
             }
         }
     }

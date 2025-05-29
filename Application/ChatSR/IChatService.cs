@@ -16,8 +16,7 @@ namespace Application.ChatSR
         Task<Result<List<int>>> GetUserChatIdsAsync(int userId);
         Task<Result<bool>> MarkMessagesAsReadAsync(int chatId, int userId, int lastReadMessageId);
         Task<Result<List<ChatDTO>>> SearchChatsByNameAsync(string searchTerm, int userId, int pageNumber = 1, int pageSize = 20);
-
-
+        Task<Result<bool>> UpdateChatStatusAsync(UpdateChatStatusDTO dto); 
 
 
 

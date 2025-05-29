@@ -15,23 +15,27 @@ namespace Mappings.ChatMappings
 
             int lastReadMessageId = currentUserParticipant?.LastReadMessageId ?? 0;
 
+            // Ensure unread count only includes non-deleted messages
             var unreadCount = chat.Messages
                 .Count(m => (currentUserParticipant?.LastReadAt == null || m.SentAt > currentUserParticipant.LastReadAt)
-                             && m.SenderId != currentUserId);
+                             && m.SenderId != currentUserId && !m.IsDeleted);
 
-            // Get the last message
             var lastMessage = chat.Messages
-                .Where(m => !m.IsDeleted)
+                .Where(m => !m.IsDeleted) 
                 .OrderByDescending(m => m.SentAt)
                 .FirstOrDefault();
 
-            return new ChatDTO
+            var createdByUserId = chat.Participants.FirstOrDefault(p => p.IsAdmin)?.UserId ?? 0;
+
+            var chatDto = new ChatDTO
             {
                 Id = chat.Id,
-                Name = chat.Name,
-                AvatarUrl = chat.AvatarUrl,
+                Name = chat.Name, // This will be the actual DB name (null for private chats)
+                AvatarUrl = chat.AvatarUrl, // This will be the actual DB avatar URL (null for private/default groups)
                 IsGroup = chat.IsGroup,
                 CreatedAt = chat.CreatedAt,
+                Status = chat.Status,
+                CreatedByUserId = createdByUserId, // <--- UPDATED THIS LINE TO USE THE ADMIN'S USERID
 
                 Participants = chat.Participants?.Select(p => new ChatParticipantDTO
                 {
@@ -43,7 +47,7 @@ namespace Mappings.ChatMappings
                 }).ToList() ?? new(),
 
                 Messages = chat.Messages?
-                    .OrderBy(m => m.SentAt) // Ensure messages are ordered for correct read logic
+                    .OrderBy(m => m.SentAt)
                     .Select(m => new MessageDTO
                     {
                         Id = m.Id,
@@ -55,13 +59,14 @@ namespace Mappings.ChatMappings
                         SentAt = m.SentAt,
                         EditedAt = m.EditedAt,
                         IsDeleted = m.IsDeleted,
-                        // This line now correctly uses the initialized 'lastReadMessageId'
+                        IsSystemMessage = m.IsSystemMessage,
                         IsReadByCurrentUser = (m.SenderId == currentUserId) || (m.Id <= lastReadMessageId),
                         Attachments = m.Attachments?.Select(a => new FileAttachmentDTO
                         {
                             Id = a.Id,
                             FileUrl = a.FileUrl,
-                            FileType = a.FileType
+                            FileType = a.FileType,
+                            FileName = a.FileName
                         }).ToList() ?? new(),
                         Reactions = m.Reactions?.Select(r => new MessageReactionDTO
                         {
@@ -73,6 +78,28 @@ namespace Mappings.ChatMappings
                 UnreadCount = unreadCount,
                 LastMessage = lastMessage?.ToDTO()
             };
+
+            // --- Start of specific edits for one-to-one chats ---
+
+            // If it's a private chat (not a group)
+            if (!chatDto.IsGroup)
+            {
+                var otherParticipant = chatDto.Participants.FirstOrDefault(p => p.UserId != currentUserId);
+
+                chatDto.Name = otherParticipant?.Username ?? "Unknown User";
+                chatDto.AvatarUrl = otherParticipant?.AvatarUrl;
+            }
+            else // It's a group chat
+            {
+                if (string.IsNullOrEmpty(chatDto.AvatarUrl))
+                {
+                    chatDto.AvatarUrl = "/images/default/groupImage.png"; // Example default group avatar
+                }
+            }
+
+            // --- End of specific edits for one-to-one chats ---
+
+            return chatDto;
         }
 
         public static MessageDTO ToDTO(this Message message)
@@ -88,11 +115,14 @@ namespace Mappings.ChatMappings
                 SentAt = message.SentAt,
                 EditedAt = message.EditedAt,
                 IsDeleted = message.IsDeleted,
+                IsSystemMessage = message.IsSystemMessage,
+
                 Attachments = message.Attachments?.Select(a => new FileAttachmentDTO
                 {
                     Id = a.Id,
                     FileUrl = a.FileUrl,
-                    FileType = a.FileType
+                    FileType = a.FileType,
+                    FileName = a.FileName
                 }).ToList() ?? new(),
                 Reactions = message.Reactions?.Select(r => new MessageReactionDTO
                 {
@@ -101,6 +131,7 @@ namespace Mappings.ChatMappings
                 }).ToList() ?? new()
             };
         }
+
         public static NewMessageNotificationDTO ToNewMessageNotificationDTO(
             this Message message,
             string chatName,

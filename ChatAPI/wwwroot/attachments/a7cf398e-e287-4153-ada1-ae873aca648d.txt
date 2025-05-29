@@ -1,0 +1,162 @@
+
+Post
+/api/orders
+{
+   "name": "John Doe",
+   "notes": "Extra spicy",
+   "address": "123 Main St",
+   "totalAmount": 45.99,
+   "orderItems": [
+       {
+           "foodID": 1,
+           "quantity": 2,
+           "price": 15.99,
+           "foodSizeId": null
+       },
+       {
+           "foodID": 2,
+           "quantity": 1,
+           "price": 13.99,
+           "foodSizeId": 3
+       }
+   ],
+   "additionIds": [1, 2],
+   "type": 0,
+   "tableNumber": null
+}
+additions 
+Get
+/api/addition
+/api/addition/{id}
+POST
+/api/addition/create
+{
+  "nameEN": "Extra Cheese",
+  "nameAR": "جبنة إضافية",
+  "price": 2.50,
+  "foodIds": [1, 2, 3]
+}
+PUT
+/api/addition/{id}
+{
+  "id": 1,
+  "nameEN": "Updated Extra Cheese",
+  "nameAR": "جبنة إضافية محدثة",
+  "price": 3.00,
+  "foodIds": [1, 2]
+}
+DELETE
+/api/addition/{id}
+
+Working Hours
+/api/workinghours
+GET
+/api/workinghours
+POST
+/api/workinghours
+{
+  "from": "09:00",
+  "to": "18:00"
+}
+social links 
+GET
+api/sociallinks
+POST
+api/sociallinks
+{
+  "platform": "Facebook",
+  "url": "https://facebook.com/example"
+}
+PUT
+api/sociallinks/{id}
+{
+  "platform": "Twitter",
+  "url": "https://twitter.com/example"
+}
+DELETE
+api/sociallinks/{id}
+POST
+api/sociallinks/add-multiple
+[
+  {
+    "platform": "Instagram",
+    "url": "https://instagram.com/example"
+  },
+  {
+    "platform": "LinkedIn",
+    "url": "https://linkedin.com/in/example"
+  }
+]
+Offers
+GET 
+/api/offer/all
+
+GET
+/api/offer/active
+GET
+/api/offer/{id}
+
+POST
+/api/offer/create
+{
+  "name": "Special Combo",
+  "description": "A delicious food combo",
+  "startDate": "2025-03-01T00:00:00",
+  "endDate": "2025-03-31T23:59:59",
+  "totalPrice": 49.99,
+  "isActive": true,
+  "foodIds": [1, 2, 3]
+}
+
+PUT
+/api/offer/update
+id: 1
+
+name: "Updated Offer"
+
+description: "Updated description"
+
+startDate: "2025-04-01T00:00:00"
+
+endDate: "2025-04-30T23:59:59"
+
+totalPrice: 59.99
+
+isActive: false
+
+imageData: (Attach an image file)
+
+foodIds[]: 2
+
+foodIds[]: 3
+
+delet 
+api/offer/delete/{id}
+
+Events
+POST
+api/Event/create
+{
+  "name": "Music Night",
+  "date": "2025-04-10",
+  "time": "19:30",
+  "isActive": true
+}
+GET
+api/Event/{id}
+api/Event/all
+api/Event/active
+
+PUT
+api/Event/update
+{
+  "id": 1,
+  "name": "Updated Music Night",
+  "date": "2025-04-15",
+  "time": "20:00",
+  "isActive": true
+}
+
+DELETE
+/api/Event/{id}
+

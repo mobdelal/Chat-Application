@@ -17,6 +17,8 @@ namespace DTOs.MessageDTOs
         public DateTime SentAt { get; set; }
         public DateTime? EditedAt { get; set; }
         public bool IsDeleted { get; set; }
+        public bool IsSystemMessage { get; set; } = false; 
+
         public bool IsReadByCurrentUser { get; set; }
         public List<FileAttachmentDTO> Attachments { get; set; } = new();
         public List<MessageReactionDTO> Reactions { get; set; } = new();

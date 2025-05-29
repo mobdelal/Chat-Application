@@ -143,6 +143,34 @@ namespace ChatAPI.Controllers
 
             return BadRequest(result);
         }
+
+        [HttpPut("{chatId}/status")]
+        public async Task<IActionResult> UpdateChatStatus(int chatId, [FromBody] UpdateChatStatusDTO dto)
+        {
+            if (chatId != dto.ChatId)
+            {
+                return BadRequest("ChatId in route must match ChatId in body.");
+            }
+
+            var userIdClaim = User.FindFirst("id");
+            if (userIdClaim == null || !int.TryParse(userIdClaim.Value, out int userId))
+            {
+                return Unauthorized("User ID not found in token.");
+            }
+
+            dto.UserId = userId;
+
+            var result = await _chatService.UpdateChatStatusAsync(dto);
+
+            if (result.IsSuccess)
+            {
+                return Ok(result); 
+            }
+            else
+            {
+                return BadRequest(result);
+            }
+        }
     }
 }
 

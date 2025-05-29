@@ -7,8 +7,16 @@
         public string? AvatarUrl { get; set; }
         public bool IsGroup { get; set; }
         public DateTime CreatedAt { get; set; }
+        public ChatStatus Status { get; set; }
         public ICollection<ChatParticipant> Participants { get; set; } = new List<ChatParticipant>();
         public ICollection<Message> Messages { get; set; } = new List<Message>();
+    }
+
+    public enum ChatStatus
+    {
+        Pending,  
+        Active,  
+        Rejected  
     }
 
 }
