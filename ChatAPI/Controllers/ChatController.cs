@@ -171,6 +171,87 @@ namespace ChatAPI.Controllers
                 return BadRequest(result);
             }
         }
+
+        [HttpPut("{chatId}/update")] 
+        [Authorize] 
+        public async Task<IActionResult> UpdateChat([FromRoute] int chatId, [FromForm] UpdateChatDTO dto)
+        {
+            if (chatId != dto.ChatId)
+            {
+                return BadRequest(Result<ChatDTO>.Failure("Chat ID in route must match Chat ID in the request body."));
+            }
+
+            var userIdClaim = User.FindFirst("id");
+            if (userIdClaim == null)
+            {
+                return Unauthorized(Result<ChatDTO>.Failure("User not authenticated."));
+            }
+
+            if (!int.TryParse(userIdClaim.Value, out int currentUserId))
+            {
+                return BadRequest(Result<ChatDTO>.Failure("Invalid user ID format."));
+            }
+
+            dto.UserId = currentUserId;
+
+            var result = await _chatService.UpdateChatAsync(dto);
+
+            if (result.IsSuccess)
+            {
+                return Ok(result);
+            }
+
+            return BadRequest(result);
+        }
+
+        [HttpDelete("{chatId}/participants")]
+        [Authorize]
+
+        public async Task<IActionResult> RemoveParticipant(int chatId, [FromBody] RemoveParticipantRequest request)
+        {
+            var kickerUserIdClaim = User.FindFirst("id");
+            if (kickerUserIdClaim == null || !int.TryParse(kickerUserIdClaim.Value, out int kickerUserId))
+            {
+                return Unauthorized("User is not authenticated or user ID is not available.");
+            }
+
+            var result = await _chatService.RemoveParticipantAsync(chatId, request.UserIdToRemove, kickerUserId);
+
+            if (result.IsSuccess)
+            {
+                return Ok(result); 
+            }
+            else
+            {
+                return BadRequest(result); 
+            }
+        }
+
+        [HttpPost("{chatId}/participants")] 
+        [Authorize] 
+        public async Task<IActionResult> AddParticipant(int chatId, [FromBody] AddParticipantRequest request)
+        {
+            var adderUserIdClaim = User.FindFirst("id"); 
+            if (adderUserIdClaim == null || !int.TryParse(adderUserIdClaim.Value, out int adderUserId))
+            {
+                return Unauthorized(Result<ChatDTO>.Failure("User is not authenticated or user ID is invalid."));
+            }
+
+            var result = await _chatService.AddParticipantAsync(
+                chatId,
+                request.UserIdToAdd,
+                adderUserId
+            );
+
+            if (result.IsSuccess)
+            {
+                return Ok(result);
+            }
+            else
+            {
+                return BadRequest(result);
+            }
+        }
     }
 }
 

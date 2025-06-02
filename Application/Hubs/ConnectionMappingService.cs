@@ -64,7 +64,7 @@ namespace Application.Hubs
     // --- ConcurrentHashSet Helper Class ---
     // (This is a simple thread-safe wrapper for a HashSet, needed because ConcurrentDictionary
     //  doesn't have a ConcurrentHashSet value type directly)
-    public class ConcurrentHashSet<T> : ICollection<T>
+    public class ConcurrentHashSet<T>  : ICollection<T> where T : notnull
     {
         private readonly ConcurrentDictionary<T, byte> _dictionary = new ConcurrentDictionary<T, byte>();
 

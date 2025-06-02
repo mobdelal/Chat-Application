@@ -173,59 +173,81 @@ namespace Application.UserSr
             }
         }
 
-        public async Task<Result<bool>> BlockUserAsync(int userId, int blockUserId)
+        public async Task<Result<BlockedUserPagedDto>> GetBlockedUsersAsync(int userId, int pageNumber = 1, int pageSize = 10)
         {
             try
             {
-                if (userId == blockUserId)
-                    return Result<bool>.Failure("You cannot block yourself.");
+                pageNumber = Math.Max(1, pageNumber);
+                pageSize = Math.Max(1, pageSize);
 
-                var existingBlock = await _context.UserBlocks
-                    .FirstOrDefaultAsync(b => b.BlockerId == userId && b.BlockedId == blockUserId);
+                var query = _context.UserBlocks.Where(ub => ub.BlockerId == userId);
+                var totalCount = await query.CountAsync();
 
-                if (existingBlock != null)
-                    return Result<bool>.Failure("User is already blocked.");
+                var singleBlockedUsers = await query
+                    .OrderByDescending(ub => ub.BlockedAt) // Order for consistent pagination
+                    .Skip((pageNumber - 1) * pageSize)
+                    .Take(pageSize)
+                    .Select(ub => new SingleBlockedUserDto // Select into the single user DTO
+                    {
+                        UserId = ub.BlockedId,
+                        Username = ub.Blocked.Username,
+                        AvatarUrl = ub.Blocked.AvatarUrl,
+                        BlockedAt = ub.BlockedAt
+                    })
+                    .ToListAsync();
 
-                var blocker = await _context.Users.FindAsync(userId);
-                var blocked = await _context.Users.FindAsync(blockUserId);
-
-                if (blocker == null || blocked == null)
-                    return Result<bool>.Failure("User not found.");
-
-                var userBlock = new UserBlock
+                var pagedDto = new BlockedUserPagedDto
                 {
-                    BlockerId = userId,
-                    BlockedId = blockUserId,
-                    BlockedAt = DateTime.UtcNow
+                    Items = singleBlockedUsers,
+                    TotalCount = totalCount,
+                    PageNumber = pageNumber,
+                    PageSize = pageSize
                 };
 
-                _context.UserBlocks.Add(userBlock);
-                await _context.SaveChangesAsync();
-
-                return Result<bool>.Success(true);
+                return Result<BlockedUserPagedDto>.Success(pagedDto);
             }
             catch (Exception ex)
             {
-                return Result<bool>.Failure($"An error occurred while blocking the user: {ex.Message}");
+                return Result<BlockedUserPagedDto>.Failure($"An error occurred while fetching blocked users: {ex.Message}");
             }
         }
 
-        public async Task<Result<List<UserDTO>>> GetBlockedUsersAsync(int userId)
+        public async Task<Result<BlockingUserPagedDto>> GetBlockedByUsersAsync(int userId, int pageNumber = 1, int pageSize = 10)
         {
             try
             {
-                var blockedUsers = await _context.UserBlocks
-                    .Where(b => b.BlockerId == userId)
-                    .Select(b => b.Blocked)
+                pageNumber = Math.Max(1, pageNumber);
+                pageSize = Math.Max(1, pageSize);
+
+                var query = _context.UserBlocks.Where(ub => ub.BlockedId == userId);
+                var totalCount = await query.CountAsync();
+
+                var singleBlockingUsers = await query
+                    .OrderByDescending(ub => ub.BlockedAt) // Order for consistent pagination
+                    .Skip((pageNumber - 1) * pageSize)
+                    .Take(pageSize)
+                    .Select(ub => new SingleBlockingUserDto // Select into the single user DTO
+                    {
+                        UserId = ub.BlockerId,
+                        Username = ub.Blocker.Username,
+                        AvatarUrl = ub.Blocker.AvatarUrl,
+                        BlockedAt = ub.BlockedAt
+                    })
                     .ToListAsync();
 
-                var blockedUsersDto = blockedUsers.Select(u => u.ToUserDTO()).ToList();
+                var pagedDto = new BlockingUserPagedDto
+                {
+                    Items = singleBlockingUsers,
+                    TotalCount = totalCount,
+                    PageNumber = pageNumber,
+                    PageSize = pageSize
+                };
 
-                return Result<List<UserDTO>>.Success(blockedUsersDto);
+                return Result<BlockingUserPagedDto>.Success(pagedDto);
             }
             catch (Exception ex)
             {
-                return Result<List<UserDTO>>.Failure($"An error occurred while retrieving blocked users: {ex.Message}");
+                return Result<BlockingUserPagedDto>.Failure($"An error occurred while fetching users who blocked you: {ex.Message}");
             }
         }
 
@@ -307,6 +329,44 @@ namespace Application.UserSr
                 return Result<List<UserDTO>>.Failure($"An error occurred while searching users. Please try again later.");
             }
         }
+
+        public async Task<Result<bool>> BlockUserAsync(int userId, int blockUserId)
+        {
+            try
+            {
+                if (userId == blockUserId)
+                    return Result<bool>.Failure("You cannot block yourself.");
+
+                var existingBlock = await _context.UserBlocks
+                    .FirstOrDefaultAsync(b => b.BlockerId == userId && b.BlockedId == blockUserId);
+
+                if (existingBlock != null)
+                    return Result<bool>.Failure("User is already blocked.");
+
+                var blocker = await _context.Users.FindAsync(userId);
+                var blocked = await _context.Users.FindAsync(blockUserId);
+
+                if (blocker == null || blocked == null)
+                    return Result<bool>.Failure("User not found.");
+
+                var userBlock = new UserBlock
+                {
+                    BlockerId = userId,
+                    BlockedId = blockUserId,
+                    BlockedAt = DateTime.UtcNow
+                };
+
+                _context.UserBlocks.Add(userBlock);
+                await _context.SaveChangesAsync();
+
+                return Result<bool>.Success(true);
+            }
+            catch (Exception ex)
+            {
+                return Result<bool>.Failure($"An error occurred while blocking the user: {ex.Message}");
+            }
+        }
+
         public async Task<Result<bool>> UnblockUserAsync(int userId, int unblockUserId)
         {
             try
@@ -315,10 +375,26 @@ namespace Application.UserSr
                     .FirstOrDefaultAsync(b => b.BlockerId == userId && b.BlockedId == unblockUserId);
 
                 if (block == null)
+                {
                     return Result<bool>.Failure("This user is not blocked.");
+                }
 
                 _context.UserBlocks.Remove(block);
                 await _context.SaveChangesAsync();
+                var rejectedChat = await _context.Chats
+                    .Include(c => c.Participants)
+                    .Where(c => !c.IsGroup && c.Status == ChatStatus.Rejected)
+                    .Where(c => c.Participants.Any(p => p.UserId == userId) &&
+                                c.Participants.Any(p => p.UserId == unblockUserId))
+                    .FirstOrDefaultAsync();
+
+                if (rejectedChat != null)
+                {
+
+                    rejectedChat.Status = ChatStatus.Active;
+                    await _context.SaveChangesAsync();
+
+                }
 
                 return Result<bool>.Success(true);
             }
@@ -571,11 +647,11 @@ namespace Application.UserSr
         }
 
         public async Task<Result<UserRelationshipStatusDTO>> GetUserRelationshipStatusAsync(
-                   int userId,
-                   int pageNumberBlocked = 1,
-                   int pageSizeBlocked = 10,
-                   int pageNumberRejected = 1,
-                   int pageSizeRejected = 10)
+            int userId,
+            int pageNumberBlocked = 1,
+            int pageSizeBlocked = 10,
+            int pageNumberRejected = 1,
+            int pageSizeRejected = 10)
         {
             try
             {
@@ -585,7 +661,7 @@ namespace Application.UserSr
                 if (pageNumberRejected < 1) pageNumberRejected = 1;
                 if (pageSizeRejected < 1 || pageSizeRejected > 50) pageSizeRejected = 10; // Adjust max page size as needed
 
-                // --- Blocked Users ---
+                // --- Blocked Users (Already correctly fetches users 'userId' is blocking) ---
                 var blockedUsersQuery = _context.UserBlocks
                     .AsNoTracking()
                     .Where(ub => ub.BlockerId == userId);
@@ -605,11 +681,12 @@ namespace Application.UserSr
                     blockedUsersDTOs = await _context.Users
                         .AsNoTracking()
                         .Where(u => blockedUserIds.Contains(u.Id))
+                        // Assuming you have a ToUserDTO extension or similar for User to UserDTO mapping
                         .Select(u => u.ToUserDTO())
                         .ToListAsync();
                 }
 
-
+                // --- Rejected Chats ---
                 var rejectedChatsQuery = _context.Chats
                     .AsNoTracking()
                     .Where(c => c.Participants.Any(p => p.UserId == userId && c.Status == ChatStatus.Rejected))
@@ -621,7 +698,7 @@ namespace Application.UserSr
                 var rejectedChatsPaged = await rejectedChatsQuery
                     .OrderByDescending(c => c.CreatedAt) // Order by creation date or last activity for consistency
                     .Skip((pageNumberRejected - 1) * pageSizeRejected) // Apply pagination
-                    .Take(pageSizeRejected)                               // Apply pagination
+                    .Take(pageSizeRejected)                             // Apply pagination
                     .Include(c => c.Participants)
                         .ThenInclude(p => p.User)
                     .Include(c => c.Messages.Where(m => !m.IsDeleted))
@@ -635,7 +712,8 @@ namespace Application.UserSr
                 var rejectedChatDTOs = new List<ChatDTO>();
                 foreach (var chat in rejectedChatsPaged) // Iterate through the Paged results
                 {
-                    rejectedChatDTOs.Add(chat.ToDTO(userId));
+                    // --- ADIT: Pass the blockedUserIds list to the ToDTO extension method ---
+                    rejectedChatDTOs.Add(chat.ToDTO(userId, blockedUserIds));
                 }
 
                 var resultDTO = new UserRelationshipStatusDTO

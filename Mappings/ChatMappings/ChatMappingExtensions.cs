@@ -1,27 +1,32 @@
-﻿using DTOs;
-using DTOs.ChatDTOs;
+﻿using DTOs.ChatDTOs;
 using DTOs.MessageDTOs;
 using Models;
 using System.Linq;
+using System.Collections.Generic;
+using DTOs; // Required for List<int>
 
 namespace Mappings.ChatMappings
 {
     public static class ChatMappingExtensions
     {
-        public static ChatDTO ToDTO(this Chat chat, int currentUserId)
+        public static ChatDTO ToDTO(this Chat chat, int currentUserId, List<int> blockedUserIds)
         {
             var currentUserParticipant = chat.Participants
                 .FirstOrDefault(p => p.UserId == currentUserId);
 
             int lastReadMessageId = currentUserParticipant?.LastReadMessageId ?? 0;
 
-            // Ensure unread count only includes non-deleted messages
-            var unreadCount = chat.Messages
-                .Count(m => (currentUserParticipant?.LastReadAt == null || m.SentAt > currentUserParticipant.LastReadAt)
-                             && m.SenderId != currentUserId && !m.IsDeleted);
+            // --- ADIT: Conditional filtering for unread count based on chat type ---
+            var unreadCount = chat.Messages.Count(m =>
+                (currentUserParticipant?.LastReadAt == null || m.SentAt > currentUserParticipant.LastReadAt)
+                && m.SenderId != currentUserId
+                && !m.IsDeleted
+                // Only exclude messages from blocked users if it's a group chat
+                && !(chat.IsGroup && blockedUserIds.Contains(m.SenderId))
+            );
 
             var lastMessage = chat.Messages
-                .Where(m => !m.IsDeleted) 
+                .Where(m => !m.IsDeleted)
                 .OrderByDescending(m => m.SentAt)
                 .FirstOrDefault();
 
@@ -30,12 +35,12 @@ namespace Mappings.ChatMappings
             var chatDto = new ChatDTO
             {
                 Id = chat.Id,
-                Name = chat.Name, // This will be the actual DB name (null for private chats)
-                AvatarUrl = chat.AvatarUrl, // This will be the actual DB avatar URL (null for private/default groups)
+                Name = chat.Name,
+                AvatarUrl = chat.AvatarUrl,
                 IsGroup = chat.IsGroup,
                 CreatedAt = chat.CreatedAt,
                 Status = chat.Status,
-                CreatedByUserId = createdByUserId, // <--- UPDATED THIS LINE TO USE THE ADMIN'S USERID
+                CreatedByUserId = createdByUserId,
 
                 Participants = chat.Participants?.Select(p => new ChatParticipantDTO
                 {
@@ -46,7 +51,10 @@ namespace Mappings.ChatMappings
                     JoinedAt = p.JoinedAt
                 }).ToList() ?? new(),
 
+                // --- ADIT: Conditional filtering for messages collection based on chat type ---
                 Messages = chat.Messages?
+                    // Only filter out messages from blocked users if it's a group chat
+                    .Where(m => !(chat.IsGroup && blockedUserIds.Contains(m.SenderId)))
                     .OrderBy(m => m.SentAt)
                     .Select(m => new MessageDTO
                     {
@@ -80,7 +88,6 @@ namespace Mappings.ChatMappings
             };
 
             // --- Start of specific edits for one-to-one chats ---
-
             // If it's a private chat (not a group)
             if (!chatDto.IsGroup)
             {
@@ -96,7 +103,6 @@ namespace Mappings.ChatMappings
                     chatDto.AvatarUrl = "/images/default/groupImage.png"; // Example default group avatar
                 }
             }
-
             // --- End of specific edits for one-to-one chats ---
 
             return chatDto;
@@ -139,7 +145,13 @@ namespace Mappings.ChatMappings
             int unreadCountInChat,
             int totalUnreadCount)
         {
-            if (message == null) return null;
+
+            if (message == null)
+            {
+                return new NewMessageNotificationDTO
+                {
+                };
+            }
 
             return new NewMessageNotificationDTO
             {
@@ -147,8 +159,10 @@ namespace Mappings.ChatMappings
                 ChatName = chatName,
                 ChatAvatarUrl = chatAvatarUrl,
                 SenderId = message.SenderId,
-                SenderUsername = message.Sender?.Username,
-                ContentSnippet = message.Content?.Length > 50 ? message.Content.Substring(0, 50) + "..." : message.Content,
+                SenderUsername = message.Sender?.Username ?? string.Empty,
+                ContentSnippet = message.Content?.Length > 50
+                                     ? message.Content.Substring(0, 50) + "..."
+                                     : message.Content ?? string.Empty,
                 SentAt = message.SentAt,
                 UnreadCountInChat = unreadCountInChat,
                 TotalUnreadCount = totalUnreadCount

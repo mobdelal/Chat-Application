@@ -155,5 +155,87 @@ namespace ChatAPI.Controllers
             }
             return BadRequest(result);
         }
+
+        [Authorize]
+        [HttpGet("blocked")]
+        public async Task<IActionResult> GetBlockedUsers(
+          [FromQuery] int pageNumber = 1,
+          [FromQuery] int pageSize = 10) // Default values for pagination
+        {
+            var userIdClaim = User.FindFirst("id");
+            if (userIdClaim == null || !int.TryParse(userIdClaim.Value, out int userId))
+            {
+                // Ensure failure result type matches the expected success type for consistency
+                return Unauthorized(Result<BlockedUserPagedDto>.Failure("User ID not found in token or invalid format."));
+            }
+
+            var result = await _userService.GetBlockedUsersAsync(userId, pageNumber, pageSize);
+
+            if (!result.IsSuccess)
+            {
+                return BadRequest(result);
+            }
+
+            return Ok(result);
+        }
+
+        [Authorize]
+        [HttpGet("blocked-by")]
+        public async Task<IActionResult> GetBlockedByUsers(
+            [FromQuery] int pageNumber = 1,
+            [FromQuery] int pageSize = 10) // Default values for pagination
+        {
+            var userIdClaim = User.FindFirst("id");
+            if (userIdClaim == null || !int.TryParse(userIdClaim.Value, out int userId))
+            {
+                return Unauthorized(Result<BlockingUserPagedDto>.Failure("User ID not found in token or invalid format."));
+            }
+
+            var result = await _userService.GetBlockedByUsersAsync(userId, pageNumber, pageSize);
+
+            if (!result.IsSuccess)
+            {
+                return BadRequest(result);
+            }
+
+            return Ok(result);
+        }
+
+        [HttpPost("block")] 
+        [Authorize] 
+        public async Task<ActionResult<Result<bool>>> BlockUser([FromBody] int blockedUserId)
+        {
+            var userIdClaim = User.FindFirst("id");
+            if (userIdClaim == null || !int.TryParse(userIdClaim.Value, out int userId))
+            {
+                return Unauthorized(Result<bool>.Failure("User ID not found in token or invalid."));
+            }
+
+            var result = await _userService.BlockUserAsync(userId, blockedUserId);
+
+            if (!result.IsSuccess)
+            {
+                return BadRequest(result); 
+            }
+            return Ok(result); 
+        }
+        [HttpDelete("unblock/{unblockUserId}")] 
+        [Authorize] 
+        public async Task<ActionResult<Result<bool>>> UnblockUser(int unblockUserId)
+        {
+            var userIdClaim = User.FindFirst("id");
+            if (userIdClaim == null || !int.TryParse(userIdClaim.Value, out int userId))
+            {
+                return Unauthorized(Result<bool>.Failure("User ID not found in token or invalid."));
+            }
+
+            var result = await _userService.UnblockUserAsync(userId, unblockUserId);
+
+            if (!result.IsSuccess)
+            {
+                return BadRequest(result); 
+            }
+            return Ok(result);
+        }
     }
 }

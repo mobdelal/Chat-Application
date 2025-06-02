@@ -50,23 +50,50 @@ namespace Application.ChatSR
                 if (creator == null)
                     return Result<ChatDTO>.Failure("Creator user not found among provided participants.");
 
+                // --- ADIT: One-to-one chat specific logic and blocking checks ---
                 if (!dto.IsGroup)
                 {
+                    // Ensure exactly two participants for a one-to-one chat
+                    if (allParticipantIds.Count != 2)
+                    {
+                        return Result<ChatDTO>.Failure("One-to-one chat must have exactly two participants.");
+                    }
 
                     var otherUserId = allParticipantIds.First(id => id != dto.CreatedByUserId);
+
+                    // Check for existing blocks between the two users
+                    var isCreatorBlockingOther = await _context.UserBlocks.AnyAsync(ub => ub.BlockerId == dto.CreatedByUserId && ub.BlockedId == otherUserId);
+                    var isOtherBlockingCreator = await _context.UserBlocks.AnyAsync(ub => ub.BlockerId == otherUserId && ub.BlockedId == dto.CreatedByUserId);
+
+                    if (isCreatorBlockingOther)
+                    {
+                        return Result<ChatDTO>.Failure("You have blocked this user. Cannot create a chat.");
+                    }
+                    if (isOtherBlockingCreator)
+                    {
+                        return Result<ChatDTO>.Failure("This user has blocked you. Cannot create a chat.");
+                    }
 
                     var existingChat = await _context.Chats
                         .Include(c => c.Participants)
                         .Where(c => !c.IsGroup &&
-                                    c.Participants.Any(p => p.UserId == dto.CreatedByUserId) &&
-                                    c.Participants.Any(p => p.UserId == otherUserId))
+                                     c.Participants.Any(p => p.UserId == dto.CreatedByUserId) &&
+                                     c.Participants.Any(p => p.UserId == otherUserId))
                         .FirstOrDefaultAsync();
 
                     if (existingChat != null)
                     {
+                        // Fetch blocked user IDs here for the existing chat DTO
+                        var blockedUserIdsForExistingChat = await _context.UserBlocks
+                            .Where(ub => ub.BlockerId == dto.CreatedByUserId || ub.BlockedId == dto.CreatedByUserId ||
+                                         ub.BlockerId == otherUserId || ub.BlockedId == otherUserId)
+                            .Select(ub => (ub.BlockerId == dto.CreatedByUserId) ? ub.BlockedId : ub.BlockerId) // Get IDs relevant to current user
+                            .Distinct()
+                            .ToListAsync();
+
                         if (existingChat.Status == ChatStatus.Active)
                         {
-                            return Result<ChatDTO>.Success(existingChat.ToDTO(dto.CreatedByUserId));
+                            return Result<ChatDTO>.Success(existingChat.ToDTO(dto.CreatedByUserId, blockedUserIdsForExistingChat));
                         }
                         else if (existingChat.Status == ChatStatus.Pending)
                         {
@@ -78,14 +105,16 @@ namespace Application.ChatSR
                         }
                     }
                 }
+                // --- End of ADIT ---
+
                 string avatarUrl = string.Empty;
 
                 if (dto.AvatarUrl != null)
                 {
                     var allowedMimeTypes = new[]
                     {
-                        "image/jpeg", "image/png", "image/gif", "image/bmp", "image/webp", "image/tiff"
-                    };
+                    "image/jpeg", "image/png", "image/gif", "image/bmp", "image/webp", "image/tiff"
+                };
                     var mimeType = dto.AvatarUrl.ContentType.ToLower();
 
                     if (!allowedMimeTypes.Contains(mimeType))
@@ -114,7 +143,7 @@ namespace Application.ChatSR
 
                 var chat = new Chat
                 {
-                    Name = dto.IsGroup ? dto.Name : "", 
+                    Name = dto.IsGroup ? (dto.Name ?? string.Empty) : string.Empty,
                     IsGroup = dto.IsGroup,
                     CreatedAt = now,
                     AvatarUrl = avatarUrl,
@@ -176,6 +205,12 @@ namespace Application.ChatSR
                 if (createdChat == null)
                     return Result<ChatDTO>.Failure("Failed to load created chat after saving.");
 
+                var blockedUserIds = await _context.UserBlocks
+                    .Where(ub => ub.BlockerId == dto.CreatedByUserId) 
+                    .Select(ub => ub.BlockedId) 
+                    .Distinct()
+                    .ToListAsync();
+
                 foreach (var participant in createdChat.Participants)
                 {
                     var connections = _connectionMappingService.GetConnections(participant.UserId);
@@ -183,7 +218,7 @@ namespace Application.ChatSR
                     {
                         await _hubContext.Groups.AddToGroupAsync(connectionId, $"Chat-{createdChat.Id}");
 
-                        await _hubContext.Clients.Client(connectionId).SendAsync("ChatCreated", createdChat.ToDTO(participant.UserId));
+                        await _hubContext.Clients.Client(connectionId).SendAsync("ChatCreated", createdChat.ToDTO(participant.UserId, blockedUserIds));
 
                         if (systemMessage != null)
                         {
@@ -192,7 +227,8 @@ namespace Application.ChatSR
                     }
                 }
 
-                return Result<ChatDTO>.Success(createdChat.ToDTO(dto.CreatedByUserId));
+                // Pass blockedUserIds to ToDTO for the final return result
+                return Result<ChatDTO>.Success(createdChat.ToDTO(dto.CreatedByUserId, blockedUserIds));
             }
             catch (Exception ex)
             {
@@ -202,6 +238,137 @@ namespace Application.ChatSR
                     Console.WriteLine($"Inner Exception: {ex.InnerException.Message}");
                 }
                 return Result<ChatDTO>.Failure($"An error occurred while creating the chat: {ex.Message}");
+            }
+        }
+        // In your ChatService (backend)
+        public async Task<Result<ChatDTO>> AddParticipantAsync(int chatId, int userIdToAdd, int adderUserId)
+        {
+            try
+            {
+                var chat = await _context.Chats
+                    .Include(c => c.Participants)
+                        .ThenInclude(p => p.User) // Include User for participant DTO mapping
+                    .FirstOrDefaultAsync(c => c.Id == chatId);
+
+                if (chat == null)
+                    return Result<ChatDTO>.Failure("Chat not found.");
+
+                // --- Admin Authorization Check ---
+                var adderParticipant = chat.Participants.FirstOrDefault(p => p.UserId == adderUserId);
+                if (adderParticipant == null || !adderParticipant.IsAdmin)
+                {
+                    return Result<ChatDTO>.Failure("You do not have permission to add participants to this chat.");
+                }
+                // --- End Admin Authorization Check ---
+
+                var userToAdd = await _context.Users.FindAsync(userIdToAdd);
+                if (userToAdd == null)
+                    return Result<ChatDTO>.Failure("User to add not found.");
+
+                var isAlreadyParticipant = chat.Participants.Any(p => p.UserId == userIdToAdd);
+                if (isAlreadyParticipant)
+                    return Result<ChatDTO>.Failure("User is already a participant in this chat.");
+
+                var participant = new ChatParticipant
+                {
+                    UserId = userIdToAdd,
+                    ChatId = chatId,
+                    IsAdmin = false,
+                    IsMuted = false,
+                    JoinedAt = DateTime.UtcNow,
+                    IsTyping = false
+                };
+
+                chat.Participants.Add(participant);
+                await _context.SaveChangesAsync(); // Save participant changes
+
+                var systemMessageContent = $"{userToAdd.Username} has joined the group.";
+                var systemMessage = new Message
+                {
+                    ChatId = chatId,
+                    SenderId = adderUserId,
+                    Content = systemMessageContent,
+                    SentAt = DateTime.UtcNow,
+                    IsSystemMessage = true
+                };
+
+                _context.Messages.Add(systemMessage);
+                await _context.SaveChangesAsync(); // Save the system message
+
+                // Re-fetch the updated chat with all its current state (including the new participant and system message's last message)
+                var updatedChat = await _context.Chats
+                    .Include(c => c.Participants)
+                        .ThenInclude(p => p.User)
+                    .Include(c => c.Messages.Where(m => !m.IsDeleted)) // Get relevant messages, not deleted ones
+                        .ThenInclude(m => m.Sender) // Include sender for MessageDTO mapping
+                    .Include(c => c.Messages) // Add this include if you want all messages, not just the non-deleted ones, when mapping
+                        .ThenInclude(m => m.Attachments)
+                    .Include(c => c.Messages)
+                        .ThenInclude(m => m.Reactions)
+                    .OrderByDescending(c => c.Messages.Max(m => m.SentAt)) // Ensure latest message is considered for 'LastMessage' in DTO
+                    .AsNoTracking() // Use AsNoTracking if you don't need to track this entity further
+                    .FirstOrDefaultAsync(c => c.Id == chatId);
+
+
+                if (updatedChat == null)
+                {
+                    return Result<ChatDTO>.Failure("Failed to retrieve updated chat after adding participant.");
+                }
+
+                // Send system message to the chat group
+                await _hubContext.Clients.Group($"Chat-{chatId}")
+                                         .SendAsync("ReceiveMessage", systemMessage.ToDTO());
+
+                // Notify all participants about the chat update (new participant, new last message)
+                foreach (var p in updatedChat.Participants)
+                {
+                    // Get blocked user IDs specific to *this* participant for their DTO mapping
+                    var participantBlockedUserIds = await _context.UserBlocks
+                        .Where(ub => ub.BlockerId == p.UserId)
+                        .Select(ub => ub.BlockedId)
+                        .Distinct()
+                        .ToListAsync();
+
+                    // Send 'ChatUpdated' event to each participant individually
+                    // This ensures each user's chat list updates with the latest chat DTO,
+                    // including the new participant and the system message as the last message.
+                    await _hubContext.Clients.User(p.UserId.ToString())
+                                             .SendAsync("ChatUpdated", updatedChat.ToDTO(p.UserId, participantBlockedUserIds));
+
+                    // Explicitly instruct the newly added user to join the SignalR group
+                    if (p.UserId == userIdToAdd)
+                    {
+                        try
+                        {
+                            await _hubContext.Clients.User(p.UserId.ToString())
+                                                     .SendAsync("JoinChatGroup", chatId);
+                        }
+                        catch (Exception ex)
+                        {
+                            Console.WriteLine($"Warning: Could not instruct added user {p.UserId} to join chat group: {ex.Message}");
+                        }
+                    }
+                }
+
+                // Return the DTO for the adding user's immediate UI update
+                // Get blocked user IDs for the current user (the adder) to pass to ToDTO()
+                var adderBlockedUserIds = await _context.UserBlocks
+                    .Where(ub => ub.BlockerId == adderUserId)
+                    .Select(ub => ub.BlockedId)
+                    .Distinct()
+                    .ToListAsync();
+                var updatedChatDtoForAdder = updatedChat.ToDTO(adderUserId, adderBlockedUserIds);
+
+                return Result<ChatDTO>.Success(updatedChatDtoForAdder);
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"Error adding participant: {ex.Message}");
+                if (ex.InnerException != null)
+                {
+                    Console.WriteLine($"Inner Exception: {ex.InnerException.Message}");
+                }
+                return Result<ChatDTO>.Failure($"An error occurred while adding participant: {ex.Message}");
             }
         }
         public async Task<Result<List<MessageDTO>>> GetChatMessagesAsync(int chatId, int? lastMessageId = null, int pageSize = 50)
@@ -289,13 +456,19 @@ namespace Application.ChatSR
                     await _context.SaveChangesAsync();
                 }
 
-                var chatDTO = chat.ToDTO(currentUserId);
+                // --- ADIT: Get the list of people the current user is blocking ---
+                var blockedUserIds = await _context.UserBlocks
+                    .Where(ub => ub.BlockerId == currentUserId) // Filter for rows where currentUserId is the blocker
+                    .Select(ub => ub.BlockedId) // Select only the IDs of the users being blocked
+                    .Distinct()
+                    .ToListAsync();
+
+                var chatDTO = chat.ToDTO(currentUserId, blockedUserIds);
 
                 if (chatDTO.Messages != null && chatDTO.Messages.Any())
                 {
                     chatDTO.Messages = chatDTO.Messages.OrderBy(m => m.SentAt).ToList();
                 }
-
 
                 return Result<ChatDTO>.Success(chatDTO);
             }
@@ -361,9 +534,9 @@ namespace Application.ChatSR
 
                 var chatDTOs = new List<ChatDTO>();
 
-                foreach (var chat in orderedChats) // Iterate through the ordered chats
+                foreach (var chat in orderedChats) 
                 {
-                    var currentUserParticipant = chat.Participants
+                    var currentUserParticipant = chat.Participants?
                         .FirstOrDefault(p => p.UserId == userId);
 
                     // Calculate UnreadCount
@@ -377,7 +550,7 @@ namespace Application.ChatSR
                         .OrderByDescending(m => m.SentAt)
                         .FirstOrDefault();
 
-                    var createdByUserId = chat.Participants.FirstOrDefault(p => p.IsAdmin)?.UserId ?? 0;
+                    var createdByUserId = chat.Participants?.FirstOrDefault(p => p.IsAdmin)?.UserId ?? 0;
 
 
 
@@ -506,13 +679,11 @@ namespace Application.ChatSR
                             return Result<MessageDTO>.Failure($"Invalid Base64 string format for attachment: {fileNameForLog}");
                         }
 
-                        // SaveFileAsync should handle null or empty filename/filetype internally if necessary,
-                        // but it's good to ensure you're not passing null if it expects non-null.
-                        // Assuming FileName and FileType are non-nullable strings in FileAttachmentDTO.
+
                         var fileUrl = await _fileStorageService.SaveFileAsync(
                             fileBytes,
-                            attachmentDto.FileName, // Assuming FileName is not null here, or add a null check if it can be.
-                            attachmentDto.FileType // Assuming FileType is not null here.
+                            attachmentDto.FileName ?? string.Empty, 
+                            attachmentDto.FileType ?? "application/octet-stream" 
                         );
 
                         if (string.IsNullOrEmpty(fileUrl))
@@ -660,47 +831,6 @@ namespace Application.ChatSR
 
             return totalUnreadCount;
         }
-        public async Task<Result<bool>> AddParticipantAsync(int chatId, int userId)
-        {
-            try
-            {
-                var chat = await _context.Chats
-                    .Include(c => c.Participants)
-                    .FirstOrDefaultAsync(c => c.Id == chatId);
-
-                if (chat == null)
-                    return Result<bool>.Failure("Chat not found.");
-
-                var userExists = await _context.Users.AnyAsync(u => u.Id == userId);
-                if (!userExists)
-                    return Result<bool>.Failure("User not found.");
-
-                var isAlreadyParticipant = chat.Participants.Any(p => p.UserId == userId);
-                if (isAlreadyParticipant)
-                    return Result<bool>.Failure("User is already a participant in this chat.");
-
-                var participant = new ChatParticipant
-                {
-                    UserId = userId,
-                    ChatId = chatId,
-                    IsAdmin = false,
-                    IsMuted = false,
-                    JoinedAt = DateTime.UtcNow,
-                    IsTyping = false
-                };
-
-                chat.Participants.Add(participant);
-                await _context.SaveChangesAsync();
-
-                // Optional: Notify other users or perform further real-time operations in the hub (if desired)
-
-                return Result<bool>.Success(true);
-            }
-            catch (Exception ex)
-            {
-                return Result<bool>.Failure($"An error occurred while adding participant: {ex.Message}");
-            }
-        }
         public async Task<Result<bool>> RemoveParticipantAsync(int chatId, int userIdToRemove, int kickerUserId)
         {
             try
@@ -726,7 +856,6 @@ namespace Application.ChatSR
                 chat.Participants.Remove(participantToRemove);
                 await _context.SaveChangesAsync();
 
-                // Optional: Logic to remove user from SignalR group can be handled in the hub if connection exists
 
                 return Result<bool>.Success(true);
             }
@@ -800,36 +929,39 @@ namespace Application.ChatSR
 
                 var query = _context.Chats
                     .AsNoTracking()
-                    // Filter chats where the current user is a participant
                     .Where(c => c.Participants.Any(p => p.UserId == userId));
 
                 var filteredChats = await query
                     .Where(c =>
                         (c.IsGroup && c.Name != null && c.Name.ToLower().Contains(lowerSearchTerm)) || // Search group chat name
                         (!c.IsGroup && c.Participants.Any(p =>
-                            p.UserId != userId && // Exclude the current user's participant entry
+                            p.UserId != userId && 
                             p.User != null && p.User.Username.ToLower().Contains(lowerSearchTerm) // Search other participant's username
                         ))
                     )
                     .Include(c => c.Participants)
                         .ThenInclude(p => p.User)
-                    .Include(c => c.Messages.Where(m => !m.IsDeleted)) // Load only non-deleted messages
+                    .Include(c => c.Messages.Where(m => !m.IsDeleted)) 
                         .ThenInclude(m => m.Sender)
                     .Include(c => c.Messages.Where(m => !m.IsDeleted))
                         .ThenInclude(m => m.Attachments)
                     .Include(c => c.Messages.Where(m => !m.IsDeleted))
                         .ThenInclude(m => m.Reactions)
-                    .OrderByDescending(c => c.CreatedAt) // Order by creation date initially
+                    .OrderByDescending(c => c.CreatedAt) 
                     .Skip((pageNumber - 1) * pageSize)
                     .Take(pageSize)
                     .ToListAsync();
 
                 var chatDTOs = new List<ChatDTO>();
+                var blockedUserIds = await _context.UserBlocks
+                    .Where(ub => ub.BlockerId == userId) 
+                    .Select(ub => ub.BlockedId) 
+                    .Distinct()
+                    .ToListAsync();
 
                 foreach (var chat in filteredChats)
                 {
-                    // Utilize the ToDTO mapping extension (which handles the one-to-one name logic)
-                    var chatDto = chat.ToDTO(userId);
+                    var chatDto = chat.ToDTO(userId, blockedUserIds);
 
                     chatDTOs.Add(chatDto);
                 }
@@ -848,7 +980,7 @@ namespace Application.ChatSR
                 return Result<List<ChatDTO>>.Failure($"An error occurred while searching for chats: {ex.Message}");
             }
         }
-        public async Task<Result<bool>> UpdateChatStatusAsync(UpdateChatStatusDTO dto) 
+        public async Task<Result<bool>> UpdateChatStatusAsync(UpdateChatStatusDTO dto)
         {
             try
             {
@@ -859,70 +991,93 @@ namespace Application.ChatSR
 
                 if (chat == null)
                 {
-                    return Result<bool>.Failure("Chat not found."); // <--- CHANGED
+                    return Result<bool>.Failure("Chat not found.");
                 }
 
                 // 1. Basic Validations
                 if (chat.IsGroup)
                 {
-                    return Result<bool>.Failure("Chat status can only be changed for one-on-one chats."); // <--- CHANGED
+                    return Result<bool>.Failure("Chat status can only be changed for one-on-one chats.");
                 }
 
                 if (chat.Status != ChatStatus.Pending)
                 {
-                    return Result<bool>.Failure($"Chat is not in a '{ChatStatus.Pending}' state. Current status: {chat.Status}."); // <--- CHANGED
+                    return Result<bool>.Failure($"Chat is not in a '{ChatStatus.Pending}' state. Current status: {chat.Status}.");
                 }
 
                 if (dto.NewStatus != ChatStatus.Active && dto.NewStatus != ChatStatus.Rejected)
                 {
-                    return Result<bool>.Failure("Invalid new status. Only 'Active' or 'Rejected' are allowed for updates."); // <--- CHANGED
+                    return Result<bool>.Failure("Invalid new status. Only 'Active' or 'Rejected' are allowed for updates.");
                 }
 
-                // 2. Authorization: Ensure the user updating the status is the *recipient* of the invitation
-                var creatorId = chat.Participants.FirstOrDefault(p => p.IsAdmin)?.UserId;
-                if (!creatorId.HasValue)
+                var initiatorParticipant = chat.Participants.FirstOrDefault(p => p.IsAdmin);
+                if (initiatorParticipant == null)
                 {
-                    creatorId = chat.Participants.OrderBy(p => p.JoinedAt).FirstOrDefault()?.UserId;
+                    return Result<bool>.Failure("Chat initiator (admin) could not be determined.");
                 }
+                var initiatorId = initiatorParticipant.UserId;
 
-                if (dto.UserId == creatorId)
+                // The recipient is the other participant who is not the initiator/admin
+                var recipientParticipant = chat.Participants.FirstOrDefault(p => p.UserId != initiatorId);
+                if (recipientParticipant == null)
                 {
-                    return Result<bool>.Failure("Only the recipient of the chat invitation can accept or reject it."); 
+                    return Result<bool>.Failure("Chat recipient could not be determined.");
                 }
+                var recipientId = recipientParticipant.UserId;
 
-                if (!chat.Participants.Any(p => p.UserId == dto.UserId))
+                if (dto.UserId != recipientId)
                 {
-                    return Result<bool>.Failure("User is not a participant in this chat."); // <--- CHANGED
+                    return Result<bool>.Failure("Only the recipient of the chat invitation can accept or reject it.");
                 }
 
-                // 3. Update Status
+                // --- ADIT: Update Status and then fetch blocked user IDs ---
                 chat.Status = dto.NewStatus;
                 await _context.SaveChangesAsync();
-
-                // Get the updated DTO to send via SignalR
-                var updatedChatDto = chat.ToDTO(dto.UserId);
 
                 string notificationMessage = string.Empty;
                 if (dto.NewStatus == ChatStatus.Active)
                 {
-                    var accepter = chat.Participants.FirstOrDefault(p => p.UserId == dto.UserId)?.User;
-                    notificationMessage = $"{accepter?.Username ?? "The user"} accepted the chat invitation.";
+                    notificationMessage = $"{recipientParticipant.User?.Username ?? "The user"} accepted the chat invitation.";
                 }
                 else if (dto.NewStatus == ChatStatus.Rejected)
                 {
-                    var rejecter = chat.Participants.FirstOrDefault(p => p.UserId == dto.UserId)?.User;
-                    notificationMessage = $"{rejecter?.Username ?? "The user"} rejected the chat invitation. This chat is now blocked.";
+                    var rejecterId = dto.UserId;
+                    var blockedUserId = initiatorId; // The initiator (admin) is the one being blocked when rejected
+
+                    var existingBlock = await _context.UserBlocks
+                        .FirstOrDefaultAsync(b => b.BlockerId == rejecterId && b.BlockedId == blockedUserId);
+
+                    if (existingBlock == null)
+                    {
+                        var userBlock = new UserBlock
+                        {
+                            BlockerId = rejecterId,
+                            BlockedId = blockedUserId,
+                            BlockedAt = DateTime.UtcNow
+                        };
+                        _context.UserBlocks.Add(userBlock);
+                        await _context.SaveChangesAsync();
+                    }
+
+                    notificationMessage = $"{recipientParticipant.User?.Username ?? "The user"} rejected the chat invitation and blocked the sender.";
                 }
+
+                // --- ADIT: Get the list of people the current user (dto.UserId) is blocking ---
+                var blockedUserIds = await _context.UserBlocks
+                    .Where(ub => ub.BlockerId == dto.UserId) // Filter for rows where dto.UserId is the blocker
+                    .Select(ub => ub.BlockedId) // Select only the IDs of the users being blocked
+                    .Distinct()
+                    .ToListAsync();
+
+                // --- ADIT: Pass the blockedUserIds list to the ToDTO extension method ---
+                var updatedChatDto = chat.ToDTO(dto.UserId, blockedUserIds);
 
                 foreach (var participant in chat.Participants)
                 {
                     var connections = _connectionMappingService.GetConnections(participant.UserId);
                     foreach (var connectionId in connections)
                     {
-                        // Send updated chat object (with new status)
                         await _hubContext.Clients.Client(connectionId).SendAsync("ChatStatusUpdated", updatedChatDto);
-
-                        // Send a system message about the action
                         await _hubContext.Clients.Client(connectionId).SendAsync("ReceiveSystemMessage", new
                         {
                             ChatId = chat.Id,
@@ -933,7 +1088,7 @@ namespace Application.ChatSR
                     }
                 }
 
-                return Result<bool>.Success(true); 
+                return Result<bool>.Success(true);
             }
             catch (Exception ex)
             {
@@ -942,7 +1097,173 @@ namespace Application.ChatSR
                 {
                     Console.WriteLine($"Inner Exception: {ex.InnerException.Message}");
                 }
-                return Result<bool>.Failure($"An error occurred while updating chat status: {ex.Message}"); 
+                return Result<bool>.Failure($"An error occurred while updating chat status: {ex.Message}");
+            }
+        }
+
+        public async Task<Result<ChatDTO>> UpdateChatAsync(UpdateChatDTO dto)
+        {
+            try
+            {
+
+                var chat = await _context.Chats
+                    .Include(c => c.Participants)
+                        .ThenInclude(p => p.User) 
+                    .FirstOrDefaultAsync(c => c.Id == dto.ChatId);
+
+                if (chat == null)
+                {
+                    return Result<ChatDTO>.Failure("Chat not found.");
+                }
+
+                if (!chat.IsGroup)
+                {
+                    return Result<ChatDTO>.Failure("Only group chats can be updated.");
+                }
+
+                // 2. Authorization: Check if the provided UserId (from claims) is an admin of this chat
+                var adminParticipant = chat.Participants.FirstOrDefault(p => p.UserId == dto.UserId && p.IsAdmin);
+                if (adminParticipant == null)
+                {
+                    return Result<ChatDTO>.Failure("Only chat administrators can update chat details.");
+                }
+
+                var adminUser = adminParticipant.User!;
+
+                bool changesMade = false;
+                List<Message> systemMessages = new List<Message>();
+                var now = DateTime.UtcNow;
+
+                // 3. Update Name if provided and different
+                if (!string.IsNullOrWhiteSpace(dto.Name) && chat.Name != dto.Name)
+                {
+                    string oldName = chat.Name;
+                    chat.Name = dto.Name;
+                    changesMade = true;
+
+                    // Add system message for name change
+                    string systemMessageContent = $"{adminUser.Username} changed the group name from \"{oldName}\" to \"{chat.Name}\".";
+                    systemMessages.Add(new Message
+                    {
+                        ChatId = chat.Id,
+                        SenderId = adminUser.Id, // System messages often attributed to the action-taker
+                        Content = systemMessageContent,
+                        SentAt = now,
+                        IsSystemMessage = true
+                    });
+                }
+
+                // 4. Update Avatar if a new file is provided
+                if (dto.AvatarFile != null)
+                {
+                    // Validate file type
+                    var allowedMimeTypes = new[]
+                    {
+                        "image/jpeg", "image/png", "image/gif", "image/bmp", "image/webp", "image/tiff"
+                    };
+                    var mimeType = dto.AvatarFile.ContentType.ToLower();
+
+                    if (!allowedMimeTypes.Contains(mimeType))
+                    {
+                        return Result<ChatDTO>.Failure("Invalid file type. Please upload an image file (JPEG, PNG, GIF, BMP, WEBP, TIFF).");
+                    }
+
+                    // Delete old avatar if it exists and is not a default image
+                    if (!string.IsNullOrEmpty(chat.AvatarUrl) && !chat.AvatarUrl.Contains("/images/default/groupImage.png"))
+                    {
+                        string oldFilePath = Path.Combine(Directory.GetCurrentDirectory(), "wwwroot", chat.AvatarUrl.TrimStart('/'));
+                        if (File.Exists(oldFilePath))
+                        {
+                            try
+                            {
+                                File.Delete(oldFilePath);
+                            }
+                            catch (Exception ex)
+                            {
+                                Console.WriteLine($"Warning: Could not delete old avatar file {oldFilePath}. Error: {ex.Message}");
+                            }
+                        }
+                    }
+
+                    // Save new avatar
+                    var fileName = "chat_" + Guid.NewGuid() + Path.GetExtension(dto.AvatarFile.FileName);
+                    string uploadFolder = Path.Combine(Directory.GetCurrentDirectory(), "wwwroot/images/chat_avatars");
+                    Directory.CreateDirectory(uploadFolder);
+                    string filePath = Path.Combine(uploadFolder, fileName);
+
+                    using (var fileStream = new FileStream(filePath, FileMode.Create))
+                    {
+                        await dto.AvatarFile.CopyToAsync(fileStream);
+                    }
+                    chat.AvatarUrl = "/images/chat_avatars/" + fileName;
+                    changesMade = true;
+
+                    // Add system message for avatar change
+                    string systemMessageContentForAvatar = $"{adminUser.Username} updated the group avatar.";
+                    systemMessages.Add(new Message
+                    {
+                        ChatId = chat.Id,
+                        SenderId = adminUser.Id,
+                        Content = systemMessageContentForAvatar,
+                        SentAt = now,
+                        IsSystemMessage = true
+                    });
+                }
+
+                if (!changesMade)
+                {
+                    return Result<ChatDTO>.Failure("No changes provided to update the chat (name or new avatar file).");
+                }
+
+                _context.Messages.AddRange(systemMessages); // Add all generated system messages
+                await _context.SaveChangesAsync();
+
+                // 5. Fetch the updated chat with necessary includes for DTO mapping
+                var updatedChatEntity = await _context.Chats
+                    .Include(c => c.Participants)
+                        .ThenInclude(p => p.User)
+                    .AsNoTracking()
+                    .FirstOrDefaultAsync(c => c.Id == chat.Id);
+
+                if (updatedChatEntity == null)
+                {
+                    return Result<ChatDTO>.Failure("Failed to retrieve updated chat after saving changes.");
+                }
+
+                // 6. Notify all participants via SignalR for the system messages and chat update
+                var blockedUserIds = await _context.UserBlocks
+                    .Where(ub => updatedChatEntity.Participants.Select(p => p.UserId).Contains(ub.BlockerId))
+                    .Select(ub => ub.BlockedId)
+                    .Distinct()
+                    .ToListAsync();
+
+                foreach (var participant in updatedChatEntity.Participants)
+                {
+                    var connections = _connectionMappingService.GetConnections(participant.UserId);
+                    foreach (var connectionId in connections)
+                    {
+                        // Send the updated ChatDTO so clients can refresh chat list/details if needed
+                        await _hubContext.Clients.Client(connectionId).SendAsync("ChatUpdated", updatedChatEntity.ToDTO(participant.UserId, blockedUserIds));
+
+                        // Send each new system message
+                        foreach (var sysMsg in systemMessages)
+                        {
+                            await _hubContext.Clients.Client(connectionId).SendAsync("ReceiveMessage", sysMsg.ToDTO());
+                        }
+                    }
+                }
+
+                // 7. Return the updated chat DTO
+                return Result<ChatDTO>.Success(updatedChatEntity.ToDTO(dto.UserId, blockedUserIds));
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"Error in UpdateChatAsync: {ex.Message}");
+                if (ex.InnerException != null)
+                {
+                    Console.WriteLine($"Inner Exception: {ex.InnerException.Message}");
+                }
+                return Result<ChatDTO>.Failure($"An error occurred while updating the chat: {ex.Message}");
             }
         }
     }
