@@ -18,6 +18,20 @@ namespace Application.ChatSR
         Task<Result<List<ChatDTO>>> SearchChatsByNameAsync(string searchTerm, int userId, int pageNumber = 1, int pageSize = 20);
         Task<Result<bool>> UpdateChatStatusAsync(UpdateChatStatusDTO dto);
         Task<Result<ChatDTO>> UpdateChatAsync(UpdateChatDTO dto);
+        Task<Result<bool>> ToggleMuteStatusAsync(ToggleMuteStatusDTO dto);
+        Task<Result<bool>> DeleteChatAsync(DeleteChatDTO dto);
+        Task<Result<bool>> LeaveGroupChatAsync(LeaveGroupChatDTO dto);
+        Task<Result<bool>> DeleteMessageAsync(DeleteMessageDTO dto);
+        Task<Result<MessageDTO>> EditMessageAsync(EditMessageDTO dto);
+        Task<Result<MessageDTO>> AddReactionAsync(AddReactionDTO dto); 
+        Task<Result<MessageDTO>> RemoveReactionAsync(RemoveReactionDTO dto);
+
+
+
+
+
+
+
 
 
 

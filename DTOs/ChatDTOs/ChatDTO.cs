@@ -15,7 +15,8 @@ namespace DTOs.ChatDTOs
         public List<MessageDTO> Messages { get; set; } = new();
         public int UnreadCount { get; set; } 
         public MessageDTO? LastMessage { get; set; }
-        public ChatStatus Status { get; set; } 
+        public ChatStatus Status { get; set; }
+        public bool IsMutedForCurrentUser { get; set; }
 
 
     }

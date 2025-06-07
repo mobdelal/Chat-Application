@@ -113,10 +113,7 @@ namespace ChatAPI.Controllers
 
         [HttpGet("search")]
         [Authorize] 
-        public async Task<IActionResult> SearchChats(
-            [FromQuery] string searchTerm,
-            [FromQuery] int pageNumber = 1,
-            [FromQuery] int pageSize = 20)
+        public async Task<IActionResult> SearchChats( [FromQuery] string searchTerm, [FromQuery] int pageNumber = 1, [FromQuery] int pageSize = 20)
         {
             var userIdClaim = User.FindFirst("id");
             if (userIdClaim == null)
@@ -252,6 +249,182 @@ namespace ChatAPI.Controllers
                 return BadRequest(result);
             }
         }
+
+
+        [HttpPost("toggle-mute")]
+        [Authorize] 
+        public async Task<IActionResult> ToggleMuteStatus([FromBody] ToggleMuteStatusDTO dto)
+        {
+            var userIdClaim = User.FindFirst("id");
+            if (userIdClaim == null || !int.TryParse(userIdClaim.Value, out int currentUserId))
+            {
+                return Unauthorized(Result<bool>.Failure("User not authenticated or invalid user ID format."));
+            }
+
+            if (dto.UserId != currentUserId)
+            {
+                return Unauthorized(Result<bool>.Failure("Unauthorized: You can only toggle your own mute status."));
+            }
+
+            var result = await _chatService.ToggleMuteStatusAsync(dto);
+
+            if (result.IsSuccess)
+            {
+                return Ok(result);
+            }
+            return BadRequest(result); 
+        }
+
+        [HttpPost("leave-group")]
+        [Authorize] 
+        public async Task<IActionResult> LeaveGroupChat([FromBody] LeaveGroupChatDTO dto)
+        {
+            var userIdClaim = User.FindFirst("id");
+            if (userIdClaim == null || !int.TryParse(userIdClaim.Value, out int currentUserId))
+            {
+                return Unauthorized(Result<bool>.Failure("User not authenticated or invalid user ID format."));
+            }
+
+            if (dto.UserId != currentUserId)
+            {
+                return Unauthorized(Result<bool>.Failure("Unauthorized: You can only leave a group as yourself."));
+            }
+
+            var result = await _chatService.LeaveGroupChatAsync(dto);
+
+            if (result.IsSuccess)
+            {
+                return Ok(result);
+            }
+            return BadRequest(result); 
+        }
+        [HttpDelete("delete-chat")]
+        [Authorize]
+        public async Task<IActionResult> DeleteChat([FromBody] DeleteChatDTO dto)
+        {
+            var userIdClaim = User.FindFirst("id");
+            if (userIdClaim == null || !int.TryParse(userIdClaim.Value, out int currentUserId))
+            {
+                return Unauthorized(Result<bool>.Failure("User not authenticated or invalid user ID format."));
+            }
+
+            if (dto.RequestingUserId != currentUserId)
+            {
+                return Unauthorized(Result<bool>.Failure("Unauthorized: You can only delete chats as yourself."));
+            }
+
+            var result = await _chatService.DeleteChatAsync(dto);
+
+            if (result.IsSuccess)
+            {
+                return Ok(result);
+            }
+            return BadRequest(result);
+        }
+
+        [HttpDelete("messages/{messageId}")]
+        public async Task<IActionResult> DeleteMessage(int messageId, [FromQuery] int chatId) 
+        {
+            var userIdClaim = User.FindFirst("id");
+            if (userIdClaim == null || !int.TryParse(userIdClaim.Value, out int currentUserId))
+            {
+                return Unauthorized(Result<bool>.Failure("User not authenticated or invalid user ID format."));
+            }
+
+            var dto = new DeleteMessageDTO
+            {
+                MessageId = messageId,
+                ChatId = chatId,
+                UserId = currentUserId 
+            };
+
+            var result = await _chatService.DeleteMessageAsync(dto);
+
+            if (result.IsSuccess)
+            {
+                return Ok(result);
+            }
+            return BadRequest(result);
+        }
+
+        [HttpPut("messages/{messageId}")] 
+        public async Task<IActionResult> EditMessage(int messageId, [FromBody] EditMessageDTO dto)
+        {
+            if (messageId != dto.MessageId)
+            {
+                return BadRequest(Result<MessageDTO>.Failure("Message ID in route must match Message ID in the request body."));
+            }
+
+            var userIdClaim = User.FindFirst("id");
+            if (userIdClaim == null || !int.TryParse(userIdClaim.Value, out int currentUserId))
+            {
+                return Unauthorized(Result<MessageDTO>.Failure("User not authenticated or invalid user ID format."));
+            }
+
+            dto.UserId = currentUserId;
+
+            var result = await _chatService.EditMessageAsync(dto);
+
+            if (result.IsSuccess)
+            {
+                return Ok(result);
+            }
+            return BadRequest(result);
+        }
+
+
+        [HttpPost("messages/{messageId}/reactions")]
+        public async Task<IActionResult> AddReaction(int messageId, [FromBody] AddReactionDTO dto)
+        {
+            if (messageId != dto.MessageId)
+            {
+                return BadRequest(Result<MessageDTO>.Failure("Message ID in route must match body."));
+            }
+
+            var userIdClaim = User.FindFirst("id");
+            if (userIdClaim == null || !int.TryParse(userIdClaim.Value, out int currentUserId))
+            {
+                return Unauthorized(Result<MessageDTO>.Failure("Invalid user ID."));
+            }
+
+            if (dto.UserId != currentUserId)
+            {
+                return Unauthorized(Result<MessageDTO>.Failure("You can only add reactions as yourself."));
+            }
+
+            var result = await _chatService.AddReactionAsync(dto);
+
+            if (result.IsSuccess)
+            {
+                return Ok(result);
+            }
+            return BadRequest(result);
+        }
+
+        [HttpDelete("messages/{messageId}/reactions")]
+        public async Task<IActionResult> RemoveReaction(int messageId, [FromQuery] int chatId, [FromQuery] string reaction)
+        {
+            var userIdClaim = User.FindFirst("id");
+            if (userIdClaim == null || !int.TryParse(userIdClaim.Value, out int currentUserId))
+            {
+                return Unauthorized(Result<MessageDTO>.Failure("Invalid user ID."));
+            }
+
+            var dto = new RemoveReactionDTO
+            {
+                MessageId = messageId,
+                ChatId = chatId,
+                UserId = currentUserId,
+                Reaction = reaction
+            };
+
+            var result = await _chatService.RemoveReactionAsync(dto);
+
+            if (result.IsSuccess)
+            {
+                return Ok(result);
+            }
+            return BadRequest(result);
+        }
     }
 }
-

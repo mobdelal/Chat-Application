@@ -237,5 +237,35 @@ namespace ChatAPI.Controllers
             }
             return Ok(result);
         }
+
+
+
+        [HttpGet("is-blocked")]
+        [Authorize]
+        public async Task<IActionResult> IsUserBlocked([FromQuery] int otherUserId)
+        {
+            var userIdClaim = User.FindFirst("id");
+            if (userIdClaim == null || !int.TryParse(userIdClaim.Value, out int userId))
+            {
+                return Unauthorized(Result<bool>.Failure("User ID not found in token or invalid format."));
+            }
+
+            if (userId == otherUserId)
+            {
+                return BadRequest(Result<bool>.Failure("Cannot check block status against yourself."));
+            }
+
+            var result = await _userService.IsUserBlockedAsync(userId, otherUserId);
+
+            if (!result.IsSuccess)
+            {
+                return StatusCode(StatusCodes.Status500InternalServerError, result);
+            }
+
+            return Ok(result);
+        }
+
     }
+
+
 }

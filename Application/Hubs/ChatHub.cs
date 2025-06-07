@@ -164,6 +164,66 @@ namespace Application.Hubs
             await base.OnDisconnectedAsync(exception);
         }
 
+        public async Task UserTyping(int chatId, int userId)
+        {
+            var currentUserIdClaim = Context.User?.FindFirst("id")?.Value;
+            if (!string.IsNullOrEmpty(currentUserIdClaim) && int.TryParse(currentUserIdClaim, out int senderUserId))
+            {
+                if (senderUserId == userId)
+                {
+                    // Fetch user details
+                    var userProfileResult = await _userService.GetUserDetailsByIdAsync(userId);
+                    if (!userProfileResult.IsSuccess || userProfileResult.Data == null)
+                    {
+                        Console.WriteLine($"Warning: Could not get user profile for typing indicator for User {userId}: {userProfileResult.ErrorMessage}");
+                        return; // Don't send typing status if user details can't be fetched
+                    }
+
+                    var typingStatus = new UserTypingStatusDTO
+                    {
+                        ChatId = chatId,
+                        UserId = userId,
+                        Username = userProfileResult.Data.Username, 
+                        AvatarUrl = userProfileResult.Data.AvatarUrl 
+                    };
+
+                    await Clients.GroupExcept($"Chat-{chatId}", Context.ConnectionId)
+                                 .SendAsync("UserTyping", typingStatus);
+                    Console.WriteLine($"User {userId} is typing in chat {chatId}. Notifying others.");
+                }
+            }
+        }
+
+        public async Task UserStoppedTyping(int chatId, int userId)
+        {
+            var currentUserIdClaim = Context.User?.FindFirst("id")?.Value;
+            if (!string.IsNullOrEmpty(currentUserIdClaim) && int.TryParse(currentUserIdClaim, out int senderUserId))
+            {
+                if (senderUserId == userId)
+                {
+                    // Fetch user details (optional here, but good for consistency)
+                    var userProfileResult = await _userService.GetUserDetailsByIdAsync(userId);
+                    if (!userProfileResult.IsSuccess || userProfileResult.Data == null)
+                    {
+                        Console.WriteLine($"Warning: Could not get user profile for stopped typing indicator for User {userId}: {userProfileResult.ErrorMessage}");
+                        // Continue even if user details are not found, as the main purpose is to signal stopping
+                    }
+
+                    var typingStatus = new UserTypingStatusDTO
+                    {
+                        ChatId = chatId,
+                        UserId = userId,
+                        Username = userProfileResult.IsSuccess ? userProfileResult.Data.Username : null, // Populate if successful
+                        AvatarUrl = userProfileResult.IsSuccess ? userProfileResult.Data.AvatarUrl : null // Populate if successful
+                    };
+
+                    await Clients.GroupExcept($"Chat-{chatId}", Context.ConnectionId)
+                                 .SendAsync("UserStoppedTyping", typingStatus);
+                    Console.WriteLine($"User {userId} stopped typing in chat {chatId}. Notifying others.");
+                }
+            }
+        }
+
 
 
     }

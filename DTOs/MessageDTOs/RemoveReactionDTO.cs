@@ -4,13 +4,13 @@ using System.Linq;
 using System.Text;
 using System.Threading.Tasks;
 
-namespace DTOs.UserDTOs
+namespace DTOs.MessageDTOs
 {
-    public class UserTypingStatusDTO
+    public class RemoveReactionDTO
     {
+        public int MessageId { get; set; }
         public int ChatId { get; set; }
         public int UserId { get; set; }
-        public string? Username { get; set; }
-        public string? AvatarUrl { get; set; }
+        public string Reaction { get; set; } = string.Empty; 
     }
 }

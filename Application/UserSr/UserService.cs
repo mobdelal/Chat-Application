@@ -269,21 +269,22 @@ namespace Application.UserSr
             }
         }
 
-        public async Task<Result<bool>> IsUserBlockedAsync(int userId, int otherUserId)
+        public async Task<Result<bool>> IsUserBlockedAsync(int blockerId, int blockedId)
         {
             try
             {
                 bool isBlocked = await _context.UserBlocks
-                    .AnyAsync(ub => ub.BlockerId == userId && ub.BlockedId == otherUserId);
+                    .AnyAsync(ub => ub.BlockerId == blockerId && ub.BlockedId == blockedId);
 
                 return Result<bool>.Success(isBlocked);
             }
             catch (Exception ex)
             {
+                // Log the exception (using a logger here would be better practice)
+                Console.Error.WriteLine($"Error in IsUserBlockedAsync: {ex.Message}");
                 return Result<bool>.Failure($"An error occurred while checking block status: {ex.Message}");
             }
         }
-
         public async Task<Result<List<UserDTO>>> SearchUsersAsync(int searchingUserId, string searchTerm, int pageNumber = 1, int pageSize = 20)
         {
             try

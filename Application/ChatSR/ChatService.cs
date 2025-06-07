@@ -240,7 +240,6 @@ namespace Application.ChatSR
                 return Result<ChatDTO>.Failure($"An error occurred while creating the chat: {ex.Message}");
             }
         }
-        // In your ChatService (backend)
         public async Task<Result<ChatDTO>> AddParticipantAsync(int chatId, int userIdToAdd, int adderUserId)
         {
             try
@@ -273,7 +272,7 @@ namespace Application.ChatSR
                 {
                     UserId = userIdToAdd,
                     ChatId = chatId,
-                    IsAdmin = false,
+                    IsAdmin = false, // Newly added participants are typically not admins by default
                     IsMuted = false,
                     JoinedAt = DateTime.UtcNow,
                     IsTyping = false
@@ -286,7 +285,7 @@ namespace Application.ChatSR
                 var systemMessage = new Message
                 {
                     ChatId = chatId,
-                    SenderId = adderUserId,
+                    SenderId = adderUserId, // This could also be a dedicated 'System' user ID
                     Content = systemMessageContent,
                     SentAt = DateTime.UtcNow,
                     IsSystemMessage = true
@@ -296,62 +295,83 @@ namespace Application.ChatSR
                 await _context.SaveChangesAsync(); // Save the system message
 
                 // Re-fetch the updated chat with all its current state (including the new participant and system message's last message)
+                // Ensure you include everything needed for the ChatDTO, especially for the newly joined user
                 var updatedChat = await _context.Chats
                     .Include(c => c.Participants)
                         .ThenInclude(p => p.User)
-                    .Include(c => c.Messages.Where(m => !m.IsDeleted)) // Get relevant messages, not deleted ones
-                        .ThenInclude(m => m.Sender) // Include sender for MessageDTO mapping
-                    .Include(c => c.Messages) // Add this include if you want all messages, not just the non-deleted ones, when mapping
+                    .Include(c => c.Messages.Where(m => !m.IsDeleted)) // Filter for relevant messages, not deleted ones
+                        .ThenInclude(m => m.Sender)
+                    .Include(c => c.Messages) // Include messages for attachments and reactions if needed for the DTO
                         .ThenInclude(m => m.Attachments)
                     .Include(c => c.Messages)
                         .ThenInclude(m => m.Reactions)
-                    .OrderByDescending(c => c.Messages.Max(m => m.SentAt)) // Ensure latest message is considered for 'LastMessage' in DTO
+                    // OrderByDescending on messages and then taking FirstOrDefault ensures LastMessage in DTO is correct
                     .AsNoTracking() // Use AsNoTracking if you don't need to track this entity further
                     .FirstOrDefaultAsync(c => c.Id == chatId);
 
 
                 if (updatedChat == null)
                 {
+                    Console.WriteLine($"Error: Failed to retrieve updated chat {chatId} after adding participant.");
                     return Result<ChatDTO>.Failure("Failed to retrieve updated chat after adding participant.");
                 }
 
-                // Send system message to the chat group
+                // Send system message to the chat group (all participants, including the new one, will receive this)
                 await _hubContext.Clients.Group($"Chat-{chatId}")
                                          .SendAsync("ReceiveMessage", systemMessage.ToDTO());
+                Console.WriteLine($"SignalR: Sent ReceiveMessage to Chat-{chatId} group for system message (user {userIdToAdd} joined).");
 
-                // Notify all participants about the chat update (new participant, new last message)
+
+                // --- Differentiate notifications for existing members vs. the newly added member ---
+
+                // 1. Notify *existing* participants about the chat update
                 foreach (var p in updatedChat.Participants)
                 {
-                    // Get blocked user IDs specific to *this* participant for their DTO mapping
+                    // Skip the newly added user; they'll get the 'ChatJoined' event
+                    if (p.UserId == userIdToAdd) continue;
+
                     var participantBlockedUserIds = await _context.UserBlocks
                         .Where(ub => ub.BlockerId == p.UserId)
                         .Select(ub => ub.BlockedId)
                         .Distinct()
                         .ToListAsync();
 
-                    // Send 'ChatUpdated' event to each participant individually
-                    // This ensures each user's chat list updates with the latest chat DTO,
-                    // including the new participant and the system message as the last message.
+                    var chatDtoForExistingParticipant = updatedChat.ToDTO(p.UserId, participantBlockedUserIds);
+                    Console.WriteLine($"SignalR: Sending ChatUpdated for ChatId: {chatId} to existing user {p.UserId}.");
                     await _hubContext.Clients.User(p.UserId.ToString())
-                                             .SendAsync("ChatUpdated", updatedChat.ToDTO(p.UserId, participantBlockedUserIds));
-
-                    // Explicitly instruct the newly added user to join the SignalR group
-                    if (p.UserId == userIdToAdd)
-                    {
-                        try
-                        {
-                            await _hubContext.Clients.User(p.UserId.ToString())
-                                                     .SendAsync("JoinChatGroup", chatId);
-                        }
-                        catch (Exception ex)
-                        {
-                            Console.WriteLine($"Warning: Could not instruct added user {p.UserId} to join chat group: {ex.Message}");
-                        }
-                    }
+                                     .SendAsync("ChatUpdated", chatDtoForExistingParticipant);
                 }
 
-                // Return the DTO for the adding user's immediate UI update
-                // Get blocked user IDs for the current user (the adder) to pass to ToDTO()
+                // 2. Handle the newly added user specifically:
+                //    - Add them to the SignalR group for future messages.
+                //    - Send them the initial chat object via the 'ChatJoined' event.
+                var newUserConnections = _connectionMappingService.GetConnections(userIdToAdd);
+                if (newUserConnections.Any())
+                {
+                    var newParticipantBlockedUserIds = await _context.UserBlocks
+                        .Where(ub => ub.BlockerId == userIdToAdd)
+                        .Select(ub => ub.BlockedId)
+                        .Distinct()
+                        .ToListAsync();
+
+                    var chatDtoForNewUser = updatedChat.ToDTO(userIdToAdd, newParticipantBlockedUserIds);
+
+                    foreach (var connectionId in newUserConnections)
+                    {
+                        Console.WriteLine($"SignalR: Instructing new user {userIdToAdd} (connection {connectionId}) to join Chat-{chatId} group.");
+                        await _hubContext.Groups.AddToGroupAsync(connectionId, $"Chat-{chatId}");
+
+                        Console.WriteLine($"SignalR: Sending ChatJoined for ChatId: {chatId} to new user {userIdToAdd} on connection {connectionId}.");
+                        await _hubContext.Clients.Client(connectionId)
+                                         .SendAsync("ChatJoined", chatDtoForNewUser);
+                    }
+                }
+                else
+                {
+                    Console.WriteLine($"Warning: New user {userIdToAdd} has no active SignalR connections. They might not receive the initial chat immediately via ChatJoined.");
+                }
+
+                // Return the DTO for the adding user's immediate UI update (the adder is one of the existing participants)
                 var adderBlockedUserIds = await _context.UserBlocks
                     .Where(ub => ub.BlockerId == adderUserId)
                     .Select(ub => ub.BlockedId)
@@ -494,8 +514,8 @@ namespace Application.ChatSR
                     {
                         Chat = chat,
                         LatestActivityDate = chat.Messages.Any(m => !m.IsDeleted)
-                                             ? chat.Messages.Where(m => !m.IsDeleted).Max(m => m.SentAt)
-                                             : chat.CreatedAt
+                                                 ? chat.Messages.Where(m => !m.IsDeleted).Max(m => m.SentAt)
+                                                 : chat.CreatedAt
                     })
                     .OrderByDescending(x => x.LatestActivityDate)
                     .Skip((pageNumber - 1) * pageSize)
@@ -525,16 +545,16 @@ namespace Application.ChatSR
 
                 var orderedChats = chatsWithLatestActivity
                     .Join(chats,
-                          activity => activity.Chat.Id,
-                          fullChat => fullChat.Id,
-                          (activity, fullChat) => new { fullChat, activity.LatestActivityDate })
+                        activity => activity.Chat.Id,
+                        fullChat => fullChat.Id,
+                        (activity, fullChat) => new { fullChat, activity.LatestActivityDate })
                     .OrderByDescending(x => x.LatestActivityDate)
                     .Select(x => x.fullChat)
                     .ToList();
 
                 var chatDTOs = new List<ChatDTO>();
 
-                foreach (var chat in orderedChats) 
+                foreach (var chat in orderedChats)
                 {
                     var currentUserParticipant = chat.Participants?
                         .FirstOrDefault(p => p.UserId == userId);
@@ -542,7 +562,7 @@ namespace Application.ChatSR
                     // Calculate UnreadCount
                     var unreadCount = chat.Messages
                         .Count(m => (currentUserParticipant?.LastReadAt == null || m.SentAt > currentUserParticipant.LastReadAt)
-                                     && m.SenderId != userId && !m.IsDeleted); // Added !m.IsDeleted check
+                                    && m.SenderId != userId && !m.IsDeleted); // Added !m.IsDeleted check
 
                     // Get LastMessage
                     var lastMessage = chat.Messages
@@ -552,8 +572,6 @@ namespace Application.ChatSR
 
                     var createdByUserId = chat.Participants?.FirstOrDefault(p => p.IsAdmin)?.UserId ?? 0;
 
-
-
                     var dto = new ChatDTO
                     {
                         Id = chat.Id,
@@ -562,7 +580,7 @@ namespace Application.ChatSR
                         IsGroup = chat.IsGroup,
                         CreatedAt = chat.CreatedAt,
                         Status = chat.Status,
-                        CreatedByUserId = createdByUserId, 
+                        CreatedByUserId = createdByUserId,
                         Participants = chat.Participants?.Select(p => new ChatParticipantDTO
                         {
                             UserId = p.UserId,
@@ -573,6 +591,9 @@ namespace Application.ChatSR
                         }).ToList() ?? new(),
                         Messages = new List<MessageDTO>(),
                         UnreadCount = unreadCount,
+                        // --- ADDITION START ---
+                        IsMutedForCurrentUser = currentUserParticipant?.IsMuted ?? false, // Map IsMuted from the current user's participant record
+                                                                                          // --- ADDITION END ---
                         LastMessage = lastMessage?.ToDTO()
                     };
 
@@ -837,6 +858,7 @@ namespace Application.ChatSR
             {
                 var chat = await _context.Chats
                     .Include(c => c.Participants)
+                        .ThenInclude(p => p.User) // Include User for participant DTO mapping
                     .FirstOrDefaultAsync(c => c.Id == chatId);
 
                 if (chat == null)
@@ -850,17 +872,120 @@ namespace Application.ChatSR
                 if (participantToRemove == null)
                     return Result<bool>.Failure("User is not a participant in this chat.");
 
-                if (participantToRemove.IsAdmin)
-                    return Result<bool>.Failure("You cannot remove an admin participant.");
+                // Prevent removing the last admin or an admin by a non-admin (if that's a rule)
+                if (participantToRemove.IsAdmin && chat.Participants.Count(p => p.IsAdmin) == 1 && kickerParticipant.UserId == userIdToRemove)
+                {
+                    return Result<bool>.Failure("Cannot remove the last admin from the chat.");
+                }
+                if (participantToRemove.IsAdmin && !kickerParticipant.IsAdmin) // Only an admin can remove another admin
+                {
+                    return Result<bool>.Failure("Only an admin can remove another admin.");
+                }
+
+                // Store the user's name before removing the participant for the system message
+                var removedUser = await _context.Users.FindAsync(userIdToRemove);
+                string removedUserName = removedUser?.Username ?? "A user";
+
 
                 chat.Participants.Remove(participantToRemove);
-                await _context.SaveChangesAsync();
+                await _context.SaveChangesAsync(); // Save the removal of the participant
 
+                // --- Add a system message for the removal ---
+                var systemMessageContent = $"{removedUserName} has been removed from the group.";
+                var systemMessage = new Message
+                {
+                    ChatId = chatId,
+                    SenderId = kickerUserId, // The user who performed the action
+                    Content = systemMessageContent,
+                    SentAt = DateTime.UtcNow,
+                    IsSystemMessage = true
+                };
+
+                _context.Messages.Add(systemMessage);
+                await _context.SaveChangesAsync(); // Save the system message
+
+                // Re-fetch the updated chat with its current state (after removal and system message)
+                var updatedChat = await _context.Chats
+                    .Include(c => c.Participants)
+                        .ThenInclude(p => p.User)
+                    .Include(c => c.Messages.Where(m => !m.IsDeleted))
+                        .ThenInclude(m => m.Sender)
+                    .Include(c => c.Messages)
+                        .ThenInclude(m => m.Attachments)
+                    .Include(c => c.Messages)
+                        .ThenInclude(m => m.Reactions)
+                    .AsNoTracking()
+                    .FirstOrDefaultAsync(c => c.Id == chatId);
+
+                if (updatedChat == null)
+                {
+                    // This might happen if the chat was just deleted, but we've already checked for null earlier.
+                    // For participant removal, it should always exist unless there's a serious bug.
+                    Console.WriteLine($"Error: Failed to retrieve updated chat {chatId} after participant removal.");
+                    // We can still proceed with notifications even if we can't fully map the DTO for existing members.
+                }
+
+                // Send system message to the chat group (all remaining members will see this)
+                await _hubContext.Clients.Group($"Chat-{chatId}")
+                                         .SendAsync("ReceiveMessage", systemMessage.ToDTO());
+                Console.WriteLine($"SignalR: Sent ReceiveMessage to Chat-{chatId} group for system message (user {userIdToRemove} removed).");
+
+
+                // --- Differentiate notifications for the removed user vs. remaining participants ---
+
+                // 1. Notify the user who was removed (if they have active connections)
+                var removedUserConnections = _connectionMappingService.GetConnections(userIdToRemove);
+                if (removedUserConnections.Any())
+                {
+                    foreach (var connectionId in removedUserConnections)
+                    {
+                        Console.WriteLine($"SignalR: Sending ChatLeft for ChatId: {chatId} to removed user {userIdToRemove} on connection {connectionId}.");
+                        // Explicitly remove from SignalR group
+                        await _hubContext.Groups.RemoveFromGroupAsync(connectionId, $"Chat-{chatId}");
+
+                        // --- NEW SIGNALR EVENT FOR LEFT CHAT ---
+                        // Send the chat ID so the client knows which chat to remove
+                        await _hubContext.Clients.Client(connectionId)
+                                         .SendAsync("ChatLeft", chatId);
+                    }
+                }
+                else
+                {
+                    Console.WriteLine($"Warning: Removed user {userIdToRemove} has no active SignalR connections. They won't receive the ChatLeft event.");
+                }
+
+                // 2. Notify all *remaining* participants about the chat update (removed participant, new last message)
+                if (updatedChat != null) // Only proceed if we successfully re-fetched the updated chat
+                {
+                    foreach (var p in updatedChat.Participants)
+                    {
+                        // Ensure we don't send ChatUpdated to the user who was just removed (already handled by ChatLeft)
+                        // and also not to the current `kickerUserId` as they will get the HTTP response immediately
+                        if (p.UserId == userIdToRemove) continue; // Should already be handled above
+                                                                  // if (p.UserId == kickerUserId) continue; // The kicker already updated their UI via HTTP response
+
+                        var participantBlockedUserIds = await _context.UserBlocks
+                            .Where(ub => ub.BlockerId == p.UserId)
+                            .Select(ub => ub.BlockedId)
+                            .Distinct()
+                            .ToListAsync();
+
+                        var chatDtoForRemainingParticipant = updatedChat.ToDTO(p.UserId, participantBlockedUserIds);
+                        Console.WriteLine($"SignalR: Sending ChatUpdated for ChatId: {chatId} to remaining user {p.UserId}.");
+                        await _hubContext.Clients.User(p.UserId.ToString())
+                                         .SendAsync("ChatUpdated", chatDtoForRemainingParticipant);
+                    }
+                }
 
                 return Result<bool>.Success(true);
             }
             catch (Exception ex)
             {
+                Console.WriteLine($"Error removing participant: {ex.Message}");
+                if (ex.InnerException != null)
+                {
+                    Console.WriteLine($"Inner Exception: {ex.InnerException.Message}");
+                }
                 return Result<bool>.Failure($"An error occurred while removing participant: {ex.Message}");
             }
         }
@@ -1100,7 +1225,6 @@ namespace Application.ChatSR
                 return Result<bool>.Failure($"An error occurred while updating chat status: {ex.Message}");
             }
         }
-
         public async Task<Result<ChatDTO>> UpdateChatAsync(UpdateChatDTO dto)
         {
             try
@@ -1266,5 +1390,501 @@ namespace Application.ChatSR
                 return Result<ChatDTO>.Failure($"An error occurred while updating the chat: {ex.Message}");
             }
         }
+        public async Task<Result<bool>> ToggleMuteStatusAsync(ToggleMuteStatusDTO dto)
+        {
+            try
+            {
+                var participant = await _context.ChatParticipants
+                    .Include(cp => cp.Chat)
+                    .Include(cp => cp.User)
+                    .FirstOrDefaultAsync(cp => cp.ChatId == dto.ChatId && cp.UserId == dto.UserId);
+
+                if (participant == null)
+                {
+                    return Result<bool>.Failure("Chat participant not found.");
+                }
+
+                bool newMuteStatus = !participant.IsMuted;
+                participant.IsMuted = newMuteStatus;
+                await _context.SaveChangesAsync();
+                return Result<bool>.Success(true);
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"Error toggling mute status: {ex.Message}");
+                if (ex.InnerException != null)
+                {
+                    Console.WriteLine($"Inner Exception: {ex.InnerException.Message}");
+                }
+                return Result<bool>.Failure($"An error occurred while toggling mute status: {ex.Message}");
+            }
+        }
+        public async Task<Result<bool>> DeleteChatAsync(DeleteChatDTO dto)
+        {
+            try
+            {
+                var chat = await _context.Chats
+                    .Include(c => c.Participants)
+                    .FirstOrDefaultAsync(c => c.Id == dto.ChatId);
+
+                if (chat == null)
+                {
+                    return Result<bool>.Failure("Chat not found.");
+                }
+
+                var creatorParticipant = chat.Participants.FirstOrDefault(p => p.IsAdmin);
+
+                if (creatorParticipant == null || creatorParticipant.UserId != dto.RequestingUserId)
+                {
+                    if (!chat.IsGroup && chat.Participants.Any(p => p.UserId == dto.RequestingUserId))
+                    {
+                        return Result<bool>.Failure("Unauthorized: Only the chat creator can delete this private chat.");
+                    }
+                    else if (chat.IsGroup)
+                    {
+                        return Result<bool>.Failure("Unauthorized: Only the chat creator can delete this group chat.");
+                    }
+                    else
+                    {
+                        return Result<bool>.Failure("Unauthorized: You do not have permission to delete this chat.");
+                    }
+                }
+
+                var participantIds = chat.Participants.Select(p => p.UserId).ToList();
+                var chatGroup = $"Chat-{chat.Id}";
+
+                // Delete associated files (avatars, attachments)
+                if (!string.IsNullOrEmpty(chat.AvatarUrl) &&
+                    !chat.AvatarUrl.Contains("/images/default/groupImage.png") &&
+                    !chat.AvatarUrl.Contains("/images/default/defaultUser.png"))
+                {
+                    var filePath = Path.Combine(Directory.GetCurrentDirectory(), "wwwroot", chat.AvatarUrl.TrimStart('/'));
+                    if (File.Exists(filePath))
+                    {
+                        File.Delete(filePath);
+                    }
+                }
+
+                var messagesWithAttachments = await _context.Messages
+                    .Where(m => m.ChatId == chat.Id)
+                    .Include(m => m.Attachments)
+                    .ToListAsync();
+
+                foreach (var message in messagesWithAttachments)
+                {
+                    foreach (var attachment in message.Attachments)
+                    {
+                        if (!string.IsNullOrEmpty(attachment.FileUrl))
+                        {
+                            var filePath = Path.Combine(Directory.GetCurrentDirectory(), "wwwroot", attachment.FileUrl.TrimStart('/'));
+                            if (File.Exists(filePath))
+                            {
+                                File.Delete(filePath);
+                            }
+                        }
+                    }
+                }
+
+                _context.Chats.Remove(chat);
+                await _context.SaveChangesAsync();
+
+                foreach (var userId in participantIds)
+                {
+                    var connections = _connectionMappingService.GetConnections(userId);
+                    foreach (var connectionId in connections)
+                    {
+                        await _hubContext.Groups.RemoveFromGroupAsync(connectionId, chatGroup);
+                        await _hubContext.Clients.Client(connectionId).SendAsync("ChatDeleted", dto.ChatId);
+                    }
+                }
+
+                return Result<bool>.Success(true);
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"Error deleting chat: {ex.Message}");
+                if (ex.InnerException != null)
+                {
+                    Console.WriteLine($"Inner Exception: {ex.InnerException.Message}");
+                }
+                return Result<bool>.Failure($"An error occurred while deleting the chat: {ex.Message}");
+            }
+        }
+        public async Task<Result<bool>> LeaveGroupChatAsync(LeaveGroupChatDTO dto)
+        {
+            try
+            {
+                var chat = await _context.Chats
+                    .Include(c => c.Participants)
+                        .ThenInclude(p => p.User)
+                    .FirstOrDefaultAsync(c => c.Id == dto.ChatId);
+
+                if (chat == null)
+                {
+                    return Result<bool>.Failure("Chat not found.");
+                }
+
+                if (!chat.IsGroup)
+                {
+                    return Result<bool>.Failure("You can only leave group chats. For private chats, you can block or delete the chat from your view.");
+                }
+
+                var participantToRemove = chat.Participants.FirstOrDefault(p => p.UserId == dto.UserId);
+
+                if (participantToRemove == null)
+                {
+                    return Result<bool>.Failure("You are not a participant of this group chat.");
+                }
+
+                var remainingAdmins = chat.Participants
+                    .Where(p => p.IsAdmin && p.UserId != dto.UserId)
+                    .ToList();
+
+                var otherParticipants = chat.Participants
+                    .Where(p => p.UserId != dto.UserId)
+                    .ToList();
+
+                if (participantToRemove.IsAdmin && !remainingAdmins.Any() && otherParticipants.Any())
+                {
+                    var newAdmin = otherParticipants.FirstOrDefault();
+                    if (newAdmin != null)
+                    {
+                        newAdmin.IsAdmin = true;
+
+                        // Optional: Log the promotion as a system message
+                        var promotedMessage = new Message
+                        {
+                            ChatId = dto.ChatId,
+                            SenderId = dto.UserId,
+                            Content = $"{newAdmin.User?.Username ?? "A member"} has been promoted to admin.",
+                            SentAt = DateTime.UtcNow,
+                            IsSystemMessage = true
+                        };
+                        _context.Messages.Add(promotedMessage);
+                    }
+                }
+
+                _context.ChatParticipants.Remove(participantToRemove);
+                await _context.SaveChangesAsync();
+
+                string systemMessageContent = $"{participantToRemove.User?.Username ?? "A user"} has left the group.";
+                var systemMessage = new Message
+                {
+                    ChatId = dto.ChatId,
+                    SenderId = dto.UserId,
+                    Content = systemMessageContent,
+                    SentAt = DateTime.UtcNow,
+                    IsSystemMessage = true
+                };
+                _context.Messages.Add(systemMessage);
+                await _context.SaveChangesAsync();
+
+                // 🔁 Check if the group is now empty and delete it
+                if (!chat.Participants.Any())
+                {
+                    var actualRemainingParticipants = await _context.ChatParticipants
+                        .CountAsync(cp => cp.ChatId == chat.Id);
+
+                    if (actualRemainingParticipants == 0)
+                    {
+                        var deleteResult = await DeleteChatAsync(new DeleteChatDTO
+                        {
+                            ChatId = chat.Id,
+                            RequestingUserId = dto.UserId
+                        });
+
+                        if (!deleteResult.IsSuccess)
+                        {
+                            Console.WriteLine($"Warning: Failed to auto-delete empty chat after last participant left: {deleteResult.ErrorMessage}");
+                            return Result<bool>.Failure($"You have left the chat, but there was an issue deleting the now-empty chat: {deleteResult.ErrorMessage}");
+                        }
+
+                        return Result<bool>.Success(true);
+                    }
+                }
+
+                var updatedChat = await _context.Chats
+                    .Include(c => c.Participants).ThenInclude(p => p.User)
+                    .Include(c => c.Messages.Where(m => !m.IsDeleted).OrderByDescending(m => m.SentAt).Take(1)).ThenInclude(m => m.Sender)
+                    .AsNoTracking()
+                    .FirstOrDefaultAsync(c => c.Id == dto.ChatId);
+
+                // 🔁 Notify all affected users
+                var allAffectedUserIds = chat.Participants.Select(p => p.UserId).ToList();
+                allAffectedUserIds.Add(dto.UserId); // Add leaving user
+
+                foreach (var userId in allAffectedUserIds.Distinct())
+                {
+                    var connections = _connectionMappingService.GetConnections(userId);
+                    foreach (var connectionId in connections)
+                    {
+                        if (userId == dto.UserId)
+                        {
+                            await _hubContext.Groups.RemoveFromGroupAsync(connectionId, $"Chat-{dto.ChatId}");
+                            await _hubContext.Clients.Client(connectionId).SendAsync("ChatLeft", dto.ChatId);
+                        }
+                        else if (updatedChat != null)
+                        {
+                            var participantBlockedUserIds = await _context.UserBlocks
+                                .Where(ub => ub.BlockerId == userId)
+                                .Select(ub => ub.BlockedId)
+                                .Distinct()
+                                .ToListAsync();
+
+                            await _hubContext.Clients.Client(connectionId).SendAsync("ChatUpdated", updatedChat.ToDTO(userId, participantBlockedUserIds));
+                            await _hubContext.Clients.Client(connectionId).SendAsync("ReceiveMessage", systemMessage.ToDTO());
+                        }
+                    }
+                }
+
+                return Result<bool>.Success(true);
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"Error leaving group chat: {ex.Message}");
+                if (ex.InnerException != null)
+                {
+                    Console.WriteLine($"Inner Exception: {ex.InnerException.Message}");
+                }
+
+                return Result<bool>.Failure($"An error occurred while leaving the group chat: {ex.Message}");
+            }
+        }
+        public async Task<Result<bool>> DeleteMessageAsync(DeleteMessageDTO dto)
+        {
+            try
+            {
+
+                var message = await _context.Messages
+                    .Include(m => m.Chat) 
+                    .FirstOrDefaultAsync(m => m.Id == dto.MessageId && m.ChatId == dto.ChatId && !m.IsDeleted);
+
+                if (message == null)
+                {
+                    return Result<bool>.Failure("Message not found or already deleted.");
+                }
+
+                var isSender = message.SenderId == dto.UserId;
+                var isChatAdmin = false;
+                if (!isSender && message.Chat.IsGroup) 
+                {
+                    var participant = await _context.ChatParticipants
+                        .FirstOrDefaultAsync(p => p.ChatId == dto.ChatId && p.UserId == dto.UserId);
+                    isChatAdmin = participant?.IsAdmin ?? false;
+                }
+
+                if (!isSender && !isChatAdmin)
+                {
+                    return Result<bool>.Failure("Unauthorized to delete this message.");
+                }
+
+                // 4. Perform Soft Delete
+                message.IsDeleted = true;
+
+                await _context.SaveChangesAsync();
+
+                await _hubContext.Clients.Group($"Chat-{dto.ChatId}")
+                    .SendAsync("MessageDeleted", dto.MessageId, dto.ChatId);
+
+                return Result<bool>.Success(true);
+            }
+            catch (Exception ex)
+            {
+                return Result<bool>.Failure($"An error occurred while deleting the message: {ex.Message}");
+
+            }
+        }
+        public async Task<Result<MessageDTO>> EditMessageAsync(EditMessageDTO dto)
+        {
+            try
+            {
+
+                var message = await _context.Messages
+                    .Include(m => m.Sender)
+                    .Include(m => m.Attachments) 
+                    .Include(m => m.Reactions)
+                    .FirstOrDefaultAsync(m => m.Id == dto.MessageId && m.ChatId == dto.ChatId && !m.IsDeleted);
+
+                if (message == null)
+                {
+                    return Result<MessageDTO>.Failure("Message not found or already deleted.");
+                }
+
+                if (message.SenderId != dto.UserId)
+                {
+                    return Result<MessageDTO>.Failure("Unauthorized to edit this message.");
+                }
+
+                message.Content = dto.NewContent;
+                message.EditedAt = DateTime.UtcNow; 
+                message. isEdited= true; 
+
+                await _context.SaveChangesAsync();
+
+                // 6. Map to DTO
+                var updatedMessageDTO = message.ToDTO();
+
+                await _hubContext.Clients.Group($"Chat-{dto.ChatId}") 
+                    .SendAsync("MessageEdited", updatedMessageDTO);
+
+                return Result<MessageDTO>.Success(updatedMessageDTO);
+            }
+            catch (Exception ex)
+            {
+                return Result<MessageDTO>.Failure($"An error occurred while editing the message: {ex.Message}");
+            }
+        }
+        public async Task<Result<MessageDTO>> AddReactionAsync(AddReactionDTO dto)
+        {
+            try
+            {
+                var message = await _context.Messages
+                    .Include(m => m.Reactions)
+                        .ThenInclude(r => r.User)
+                    .Include(m => m.Sender)
+                    .Include(m => m.Attachments) // Include attachments for the ToDTO mapping
+                    .FirstOrDefaultAsync(m => m.Id == dto.MessageId && m.ChatId == dto.ChatId);
+
+                if (message == null)
+                {
+                    return Result<MessageDTO>.Failure("Message not found.");
+                }
+
+                // Check if the user already has ANY reaction on this message
+                var existingUserReaction = message.Reactions
+                    .FirstOrDefault(r => r.UserId == dto.UserId);
+
+                if (existingUserReaction != null)
+                {
+                    // If the existing reaction is the SAME as the new one, it means they clicked to "un-react"
+                    if (existingUserReaction.Reaction == dto.Reaction)
+                    {
+                        // Remove the existing reaction
+                        message.Reactions.Remove(existingUserReaction);
+                        _context.MessageReactions.Remove(existingUserReaction); // Mark for deletion in DB
+                        await _context.SaveChangesAsync();
+
+                        // Re-fetch and broadcast updated message
+                        var updatedMessageAfterRemoval = await _context.Messages
+                            .Include(m => m.Reactions)
+                                .ThenInclude(r => r.User)
+                            .Include(m => m.Sender)
+                            .Include(m => m.Attachments)
+                            .FirstOrDefaultAsync(m => m.Id == dto.MessageId);
+
+                        if (updatedMessageAfterRemoval == null)
+                        {
+                            return Result<MessageDTO>.Failure("Failed to retrieve updated message after removing reaction.");
+                        }
+
+                        var updatedMessageDTOAfterRemoval = updatedMessageAfterRemoval.ToDTO();
+                        await _hubContext.Clients.Group($"Chat-{dto.ChatId}")
+                            .SendAsync("MessageUpdated", updatedMessageDTOAfterRemoval); // Use MessageUpdated
+                        return Result<MessageDTO>.Success(updatedMessageDTOAfterRemoval);
+                    }
+                    else // User has a different reaction, remove the old one and add the new one
+                    {
+                        message.Reactions.Remove(existingUserReaction);
+                        _context.MessageReactions.Remove(existingUserReaction); // Mark for deletion
+                        // No SaveChanges yet, we'll save after adding the new one
+                    }
+                }
+
+                // Add the new reaction (this will happen if no existing reaction, or if a different one was removed)
+                var user = await _context.Users.FindAsync(dto.UserId);
+                if (user == null)
+                {
+                    return Result<MessageDTO>.Failure("User not found.");
+                }
+
+                var newReaction = new MessageReaction
+                {
+                    MessageId = dto.MessageId,
+                    UserId = dto.UserId,
+                    Reaction = dto.Reaction,
+                    User = user // Attach the user entity
+                };
+
+                message.Reactions.Add(newReaction);
+                await _context.SaveChangesAsync(); // Save changes for both removal (if any) and addition
+
+                // Re-fetch the message to ensure all includes are fresh before mapping
+                var updatedMessage = await _context.Messages
+                    .Include(m => m.Reactions)
+                        .ThenInclude(r => r.User)
+                    .Include(m => m.Sender)
+                    .Include(m => m.Attachments)
+                    .FirstOrDefaultAsync(m => m.Id == dto.MessageId);
+
+                if (updatedMessage == null)
+                {
+                    return Result<MessageDTO>.Failure("Failed to retrieve updated message after adding reaction.");
+                }
+
+                var updatedMessageDTO = updatedMessage.ToDTO();
+
+
+                await _hubContext.Clients.Group($"Chat-{dto.ChatId}")
+                     .SendAsync("MessageReactionAdded", updatedMessageDTO);
+
+                return Result<MessageDTO>.Success(updatedMessageDTO);
+            }
+            catch (Exception ex)
+            {
+                return Result<MessageDTO>.Failure($"An error occurred while adding reaction: {ex.Message}");
+            }
+        }
+        public async Task<Result<MessageDTO>> RemoveReactionAsync(RemoveReactionDTO dto)
+        {
+            try
+            {
+                var message = await _context.Messages
+                    .Include(m => m.Reactions)
+                        .ThenInclude(r => r.User)
+                    .Include(m => m.Sender) 
+                    .FirstOrDefaultAsync(m => m.Id == dto.MessageId && m.ChatId == dto.ChatId);
+
+                if (message == null)
+                {
+                    return Result<MessageDTO>.Failure("Message not found.");
+                }
+
+                var reactionToRemove = message.Reactions
+                    .FirstOrDefault(r => r.UserId == dto.UserId && r.Reaction == dto.Reaction);
+
+                if (reactionToRemove == null)
+                {
+                    return Result<MessageDTO>.Failure("Reaction not found on this message by this user.");
+                }
+
+                message.Reactions.Remove(reactionToRemove);
+                _context.MessageReactions.Remove(reactionToRemove); 
+                await _context.SaveChangesAsync();
+
+                // Re-fetch the message to ensure all includes are fresh before mapping
+                var updatedMessage = await _context.Messages
+                    .Include(m => m.Reactions)
+                        .ThenInclude(r => r.User)
+                    .Include(m => m.Sender)
+                    .Include(m => m.Attachments)
+                    .FirstOrDefaultAsync(m => m.Id == dto.MessageId);
+
+                if (updatedMessage == null)
+                {
+                    return Result<MessageDTO>.Failure("Failed to retrieve updated message after removing reaction.");
+                }
+
+                var updatedMessageDTO = updatedMessage.ToDTO();
+
+                await _hubContext.Clients.Group($"Chat-{dto.ChatId}")
+                    .SendAsync("MessageReactionRemoved", updatedMessageDTO);
+
+                return Result<MessageDTO>.Success(updatedMessageDTO);
+            }
+            catch (Exception ex)
+            {
+                return Result<MessageDTO>.Failure($"An error occurred while removing reaction: {ex.Message}");
+            }
+        }
     }
-}    
+}

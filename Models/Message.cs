@@ -10,6 +10,7 @@
         public string? Content { get; set; } 
         public DateTime SentAt { get; set; }
         public DateTime? EditedAt { get; set; }
+        public bool isEdited { get; set; } = false;
 
         public bool IsDeleted { get; set; }
         public bool IsSystemMessage { get; set; } = false; 

@@ -9,6 +9,8 @@ namespace DTOs.MessageDTOs
     public class MessageReactionDTO
     {
         public int UserId { get; set; }
+        public string Username { get; set; } = string.Empty; 
+        public string? AvatarUrl { get; set; } 
         public string Reaction { get; set; } = string.Empty;
     }
 

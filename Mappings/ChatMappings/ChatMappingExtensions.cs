@@ -68,6 +68,7 @@ namespace Mappings.ChatMappings
                         EditedAt = m.EditedAt,
                         IsDeleted = m.IsDeleted,
                         IsSystemMessage = m.IsSystemMessage,
+                        isEdited = m.isEdited,
                         IsReadByCurrentUser = (m.SenderId == currentUserId) || (m.Id <= lastReadMessageId),
                         Attachments = m.Attachments?.Select(a => new FileAttachmentDTO
                         {
@@ -79,10 +80,13 @@ namespace Mappings.ChatMappings
                         Reactions = m.Reactions?.Select(r => new MessageReactionDTO
                         {
                             UserId = r.UserId,
-                            Reaction = r.Reaction
-                        }).ToList() ?? new()
+                            Reaction = r.Reaction,
+                            // ADDED null-conditional operator here
+                            Username = r.User?.Username ?? "",
+                            AvatarUrl = r.User?.AvatarUrl
+                        }).ToList() ?? new List<MessageReactionDTO>()
                     }).ToList() ?? new(),
-
+                IsMutedForCurrentUser = currentUserParticipant?.IsMuted ?? false,
                 UnreadCount = unreadCount,
                 LastMessage = lastMessage?.ToDTO()
             };
@@ -121,6 +125,7 @@ namespace Mappings.ChatMappings
                 SentAt = message.SentAt,
                 EditedAt = message.EditedAt,
                 IsDeleted = message.IsDeleted,
+                isEdited = message.isEdited,
                 IsSystemMessage = message.IsSystemMessage,
 
                 Attachments = message.Attachments?.Select(a => new FileAttachmentDTO
@@ -130,11 +135,15 @@ namespace Mappings.ChatMappings
                     FileType = a.FileType,
                     FileName = a.FileName
                 }).ToList() ?? new(),
-                Reactions = message.Reactions?.Select(r => new MessageReactionDTO
-                {
-                    UserId = r.UserId,
-                    Reaction = r.Reaction
-                }).ToList() ?? new()
+                Reactions = message.Reactions?
+                                .Select(r => new MessageReactionDTO
+                                {
+                                    UserId = r.UserId,
+                                    Reaction = r.Reaction,
+                                    // ADDED null-conditional operator here
+                                    Username = r.User?.Username ?? "",
+                                    AvatarUrl = r.User?.AvatarUrl
+                                }).ToList() ?? new List<MessageReactionDTO>()
             };
         }
 
@@ -161,8 +170,8 @@ namespace Mappings.ChatMappings
                 SenderId = message.SenderId,
                 SenderUsername = message.Sender?.Username ?? string.Empty,
                 ContentSnippet = message.Content?.Length > 50
-                                     ? message.Content.Substring(0, 50) + "..."
-                                     : message.Content ?? string.Empty,
+                                            ? message.Content.Substring(0, 50) + "..."
+                                            : message.Content ?? string.Empty,
                 SentAt = message.SentAt,
                 UnreadCountInChat = unreadCountInChat,
                 TotalUnreadCount = totalUnreadCount
