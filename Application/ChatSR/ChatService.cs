@@ -1396,7 +1396,7 @@ namespace Application.ChatSR
             {
                 var participant = await _context.ChatParticipants
                     .Include(cp => cp.Chat)
-                    .Include(cp => cp.User)
+                    .Include(cp => cp.User) 
                     .FirstOrDefaultAsync(cp => cp.ChatId == dto.ChatId && cp.UserId == dto.UserId);
 
                 if (participant == null)
@@ -1407,6 +1407,20 @@ namespace Application.ChatSR
                 bool newMuteStatus = !participant.IsMuted;
                 participant.IsMuted = newMuteStatus;
                 await _context.SaveChangesAsync();
+
+
+                var updatePayload = new
+                {
+                    ChatId = dto.ChatId,
+                    UserId = dto.UserId,         
+                    IsMuted = newMuteStatus,     
+                                                 
+                };
+
+                var chatGroup = $"Chat-{dto.ChatId}";
+
+                await _hubContext.Clients.Group(chatGroup).SendAsync("ChatMuteStatusUpdated", updatePayload);
+
                 return Result<bool>.Success(true);
             }
             catch (Exception ex)

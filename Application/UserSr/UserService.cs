@@ -16,6 +16,8 @@ using System.Threading.Tasks;
 using System.IO;
 using DTOs.ChatDTOs;
 using Mappings.ChatMappings;
+using Microsoft.AspNetCore.SignalR;
+using Application.Hubs;
 
 
 namespace Application.UserSr
@@ -25,12 +27,15 @@ namespace Application.UserSr
         private readonly AppDbContext _context;
         private readonly JwtSettings _jwtSettings;
         private readonly string _webRootPath;
+        private readonly IHubContext<ChatHub> _hubContext;
 
-        public UserService(AppDbContext context, IOptions<JwtSettings> jwtSettings)
+
+        public UserService(AppDbContext context, IOptions<JwtSettings> jwtSettings, IHubContext<ChatHub> hubContext)
         {
             _context = context;
             _jwtSettings = jwtSettings.Value;
             _webRootPath = Path.Combine(Directory.GetCurrentDirectory(), "wwwroot");
+            _hubContext = hubContext;
         }
 
         public async Task<Result<UserDTO>> RegisterAsync(RegisterDTO dto)
@@ -64,7 +69,6 @@ namespace Application.UserSr
                     }
 
                     var fileName = Guid.NewGuid() + "_" + dto.Avatar.FileName;
-                    // Use _webRootPath for consistency and correct base path
                     string uploadFolder = Path.Combine(_webRootPath, "images", "avatars");
 
                     Directory.CreateDirectory(uploadFolder);
@@ -584,8 +588,8 @@ namespace Application.UserSr
                 {
                     var allowedMimeTypes = new[]
                     {
-                        "image/jpeg", "image/png", "image/gif", "image/bmp", "image/webp", "image/tiff"
-                    };
+                    "image/jpeg", "image/png", "image/gif", "image/bmp", "image/webp", "image/tiff"
+                };
                     var mimeType = dto.AvatarFile.ContentType.ToLower();
 
                     if (!allowedMimeTypes.Contains(mimeType))
@@ -632,12 +636,33 @@ namespace Application.UserSr
                     user.AvatarUrl = "/images/avatars/" + uniqueFileName;
                 }
 
+                // Store the original notification preference to check if it changed
+                bool originalReceiveNotifications = user.ReceiveNotifications;
+                bool notificationsPreferenceChanged = false;
+
                 if (dto.ReceiveNotifications.HasValue)
                 {
-                    user.ReceiveNotifications = dto.ReceiveNotifications.Value;
+                    if (user.ReceiveNotifications != dto.ReceiveNotifications.Value)
+                    {
+                        user.ReceiveNotifications = dto.ReceiveNotifications.Value;
+                        notificationsPreferenceChanged = true; 
+                    }
                 }
 
-                await _context.SaveChangesAsync();
+                await _context.SaveChangesAsync(); 
+
+                if (notificationsPreferenceChanged)
+                {
+                    var updatePayload = new
+                    {
+                        UserId = userId,
+                        ReceiveNotifications = user.ReceiveNotifications
+                    };
+
+                    await _hubContext.Clients.All.SendAsync("UserProfileUpdated", updatePayload);
+                    Console.WriteLine($"SignalR: Sent UserProfileUpdated for User ID {userId}, ReceiveNotifications: {user.ReceiveNotifications}");
+                }
+
                 return Result<bool>.Success(true);
             }
             catch (Exception ex)
@@ -646,7 +671,6 @@ namespace Application.UserSr
                 return Result<bool>.Failure($"An error occurred while updating profile: {ex.Message}");
             }
         }
-
         public async Task<Result<UserRelationshipStatusDTO>> GetUserRelationshipStatusAsync(
             int userId,
             int pageNumberBlocked = 1,

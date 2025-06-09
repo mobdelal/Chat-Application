@@ -35,7 +35,7 @@ namespace ChatAPI
 
             builder.Services.AddSignalR(hubOptions =>
             {
-                hubOptions.MaximumReceiveMessageSize = 10 * 1024 * 1024; 
+                hubOptions.MaximumReceiveMessageSize = 50 * 1024 * 1024; 
             });
 
             var allowedOrigins = builder.Configuration.GetSection("AllowedOrigins").Get<string[]>();

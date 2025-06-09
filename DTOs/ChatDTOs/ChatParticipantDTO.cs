@@ -13,6 +13,8 @@ namespace DTOs.ChatDTOs
         public string? AvatarUrl { get; set; }
         public bool IsAdmin { get; set; }
         public DateTime JoinedAt { get; set; }
+        public bool IsMuted { get; set; }
+
     }
 
 }

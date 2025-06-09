@@ -48,7 +48,8 @@ namespace Mappings.ChatMappings
                     Username = p.User?.Username ?? "",
                     AvatarUrl = p.User?.AvatarUrl,
                     IsAdmin = p.IsAdmin,
-                    JoinedAt = p.JoinedAt
+                    JoinedAt = p.JoinedAt,
+                    IsMuted = p.IsMuted
                 }).ToList() ?? new(),
 
                 // --- ADIT: Conditional filtering for messages collection based on chat type ---
